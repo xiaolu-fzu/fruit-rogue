@@ -1,0 +1,11 @@
+# 临时测试残留（Chrome CDP profile）
+.cdp-*/
+.probe-*/
+.hudtest-*/
+.mobshot-*/
+shot-*.png
+_shot.html
+
+# 系统/编辑器
+.DS_Store
+Thumbs.db
