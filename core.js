@@ -188,7 +188,7 @@
   const BOSS_CHARGE_TIME = [1.0, 1.4]; // 冲锋时长范围（秒）
   const BOSS_PAUSE_TIME = 0.8;  // 冲锋结束停顿（秒）
   // 手机端视角拉大（t22）：触屏/窄屏时摄像机缩放 0.8（可见世界范围 = 画布/0.8）
-  const VIEW_ZOOM_TOUCH = 0.8;  // 触屏/窄屏视角缩放
+  const VIEW_ZOOM_TOUCH = 0.72;  // 触屏/窄屏视角缩放（越小视野越大）
   const NARROW_THRESHOLD = 700; // 窄屏判定阈值（宽或高 < 该值）
 
   // 敌人类型基准配置（type 供 drawEnemy 区分造型，gemValue 供 rogue 的 onEnemyKilled
