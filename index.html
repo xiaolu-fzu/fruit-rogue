@@ -52,6 +52,18 @@
     transition: width .18s ease-out;
     box-shadow: 0 0 10px rgba(255, 255, 255, 0.25) inset;
   }
+  /* 玩家 HP 条：亮红→粉红渐变（与 boss 深红条区分：更亮 + 白描边） */
+  #hud-hp-fill {
+    background: linear-gradient(90deg, #ff5252, #ff8a80);
+  }
+  /* 经验条：蓝色渐变 */
+  #hud-xp-fill {
+    background: linear-gradient(90deg, #1e88e5, #64b5f6);
+  }
+  /* 护盾条（core 流程默认色） */
+  #hud-shield-fill {
+    background: linear-gradient(90deg, #0ea5e9, #7ff7ff);
+  }
   .bar.xp { height: 9px; }
   .bar.shield { height: 6px; }
   .bar .bar-text {
@@ -73,7 +85,7 @@
 
   /* ── Boss 血条（core 契约：#boss-bar 容器 / #boss-fill 填充 / #boss-name 名称） ── */
   #boss-bar {
-    position: fixed; top: calc(10px + env(safe-area-inset-top)); left: 50%; transform: translateX(-50%);
+    position: fixed; top: calc(18px + env(safe-area-inset-top)); left: 50%; transform: translateX(-50%);
     z-index: 12; display: none; flex-direction: column; align-items: center; gap: 3px;
     width: min(420px, 62vw); pointer-events: none;
   }
@@ -88,7 +100,8 @@
   }
   #boss-fill {
     height: 100%; width: 0%; border-radius: 7px;
-    background: linear-gradient(90deg, #ff3040, #ff8a3c);
+    /* boss 血条：深红（暗于玩家亮红条），配合金色描边与玩家区分 */
+    background: linear-gradient(90deg, #c62828, #ff1744);
     box-shadow: 0 0 10px rgba(255, 80, 40, 0.8) inset;
     transition: width .15s ease-out;
   }
@@ -252,7 +265,12 @@
     right: calc(14px + env(safe-area-inset-right));
     bottom: calc(18px + env(safe-area-inset-bottom));
     display: none; flex-direction: column; gap: 12px; z-index: 40;
+    /* 5 武器竖排（含 laser）小屏防溢出：超高时内部滚动 */
+    max-height: calc(100vh - 96px);
+    overflow-y: auto;
+    scrollbar-width: none;
   }
+  #weapon-pad::-webkit-scrollbar { display: none; }
   body.touch #weapon-pad.show { display: flex; }
   .weapon-btn {
     position: relative;
@@ -295,7 +313,7 @@
     #joy { width: 116px; height: 116px; margin: -58px 0 0 -58px; }
     #joy-knob { width: 52px; height: 52px; margin: -26px 0 0 -26px; }
     /* 手机端 Boss 血条下移，避开顶部 HUD 条 */
-    #boss-bar { top: calc(64px + env(safe-area-inset-top)); width: min(340px, 70vw); }
+    #boss-bar { top: calc(88px + env(safe-area-inset-top)); width: min(340px, 70vw); }
     #boss-name { font-size: 13px; }
     .boss-fill-wrap { height: 10px; }
   }
@@ -542,12 +560,14 @@
         }
 
         /* ── 触控武器切换按钮：右下角竖排，只显示已解锁，高亮当前 ── */
-        var WEAPON_ORDER = ['blaster', 'boomerang', 'pineapple', 'orange'];
+        // 顺序与 core WEAPON_ORDER 一致（含第 5 武器 laser，索引 4 → setWeapon(5)）
+        var WEAPON_ORDER = ['blaster', 'boomerang', 'pineapple', 'orange', 'laser'];
         var WEAPON_META = {
           blaster:   { icon: '💥', name: '能量弹' },
           boomerang: { icon: '🍉', name: '西瓜回旋镖' },
           pineapple: { icon: '🍍', name: '菠萝榴弹' },
-          orange:    { icon: '🍊', name: '橙子连射' }
+          orange:    { icon: '🍊', name: '橙子连射' },
+          laser:     { icon: '🔦', name: '激光炮' }
         };
         var lastSig = '';
         function buildPad() {

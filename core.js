@@ -183,9 +183,13 @@
   const BOSS_SKILL_MAX = 5.0;   // 技能间隔上限（秒）
   const BOSS_SKILL_FAST = 0.75; // 半血后间隔倍率
   const BOSS_SKILL_FLOOR = 2.5; // 半血后间隔下限（秒）
-  const BOSS_SHOCK_RANGE = 280; // 冲击波命中范围下限（像素；实际 = max(280, boss.r×6)）
+  const BOSS_SHOCK_RANGE = 230; // 冲击波命中范围（像素；实际 = max(230, boss.r×5) ≈ 230）
+  const BOSS_SHOCK_KNOCK = 45;  // 冲击波击退距离（像素）
   const BOSS_CHARGE_TIME = [1.0, 1.4]; // 冲锋时长范围（秒）
   const BOSS_PAUSE_TIME = 0.8;  // 冲锋结束停顿（秒）
+  // 手机端视角拉大（t22）：触屏/窄屏时摄像机缩放 0.8（可见世界范围 = 画布/0.8）
+  const VIEW_ZOOM_TOUCH = 0.8;  // 触屏/窄屏视角缩放
+  const NARROW_THRESHOLD = 700; // 窄屏判定阈值（宽或高 < 该值）
 
   // 敌人类型基准配置（type 供 drawEnemy 区分造型，gemValue 供 rogue 的 onEnemyKilled
   // 读取决定宝石价值；weight 为随机权重，出现门槛由波次控制（见 pickEnemyType））
@@ -265,6 +269,7 @@
   let camX = WORLD_SIZE / 2;   // 摄像机世界坐标 X（每帧跟随玩家，clamp 到世界边界）
   let camY = WORLD_SIZE / 2;   // 摄像机世界坐标 Y
   let viewW = 0, viewH = 0;    // 视野尺寸（= 画布尺寸）
+  let zoom = 1;                // 视角缩放（触屏/窄屏 0.8 拉大可见范围）
   let wave = 1;                // 当前波次（从 1 开始）
   let waveQuota = 0;           // 当前波敌人配额（6 + wave×3）
   let waveSpawned = 0;         // 当前波已生成数量
@@ -337,10 +342,11 @@
     return 'normal';
   }
 
-  // 出生位置：玩家视野边缘外一圈（不再是固定屏幕四边），并 clamp 到世界边界内
+  // 出生位置：玩家视野边缘外一圈（按缩放后的可见视野调整），并 clamp 到世界边界内
   function pickSpawnPos() {
-    const vx0 = camX - viewW / 2, vy0 = camY - viewH / 2;
-    const vx1 = camX + viewW / 2, vy1 = camY + viewH / 2;
+    const vw = viewW / zoom, vh = viewH / zoom;      // 缩放后可见世界范围
+    const vx0 = camX - vw / 2, vy0 = camY - vh / 2;
+    const vx1 = camX + vw / 2, vy1 = camY + vh / 2;
     const m = SPAWN_MARGIN;
     const side = Math.floor(rand(0, 4));
     let x = 0, y = 0;
@@ -771,16 +777,17 @@
   }
 
   // 技能 1：冲击波——扩散环形冲击波（drawEffect('shockwave')），范围内玩家受伤+击退。
-  // 范围 = max(280, boss.r×6)（boss.r=46 → 280 ≈ 直径 3 倍）；范围存入 fx.r 供 art 扩散视觉
+  // 范围 = max(230, boss.r×5) ≈ 230（t22 削弱）；范围存入 fx.r 供 art 扩散视觉；
+  // 伤害 = boss.damage（×1.0，t22 削弱）；击退 = 45px
   function bossShockwave(e) {
-    const range = Math.max(BOSS_SHOCK_RANGE, e.r * 6);
+    const range = Math.max(BOSS_SHOCK_RANGE, e.r * 5);
     addEffect('shockwave', e.x, e.y, 0.9, range);
     const d = dist(e.x, e.y, player.x, player.y);
     if (d < range + player.r) {
-      damagePlayer(e.damage * 1.2, e.x, e.y);
+      damagePlayer(e.damage, e.x, e.y);
       const dd = d || 1;
-      player.x = clamp(player.x + ((player.x - e.x) / dd) * 60, player.r, WORLD_SIZE - player.r);
-      player.y = clamp(player.y + ((player.y - e.y) / dd) * 60, player.r, WORLD_SIZE - player.r);
+      player.x = clamp(player.x + ((player.x - e.x) / dd) * BOSS_SHOCK_KNOCK, player.r, WORLD_SIZE - player.r);
+      player.y = clamp(player.y + ((player.y - e.y) / dd) * BOSS_SHOCK_KNOCK, player.r, WORLD_SIZE - player.r);
     }
   }
 
@@ -925,7 +932,8 @@
             e.flashUntil = now() + HIT_FLASH;
             const d = dist(b.x, b.y, e.x, e.y) || 1;
             // 击退力按武器配置（orange 特调 1/4；激光 1；其余 3）——并 clamp 世界边界
-            const kb = b.knockback != null ? b.knockback : 3;
+            // boss 免疫除初始武器 blaster 外的一切击退
+            const kb = (e.type === 'boss' && b.vis !== 'blaster') ? 0 : (b.knockback != null ? b.knockback : 3);
             e.x = clamp(e.x + ((e.x - b.x) / d) * kb, e.r, WORLD_SIZE - e.r);
             e.y = clamp(e.y + ((e.y - b.y) / d) * kb, e.r, WORLD_SIZE - e.r);
             burst(b.x, b.y, 3, b.crit ? '#ffddaa' : '#aaddff');
@@ -986,10 +994,12 @@
         const dealt = Math.min(g.damage, e.hp);
         e.hp -= g.damage;
         e.flashUntil = now() + HIT_FLASH;
-        // 从爆炸中心向外击退（clamp 世界边界）
-        const dd = d || 1;
-        e.x = clamp(e.x + ((e.x - g.x) / dd) * 14, e.r, WORLD_SIZE - e.r);
-        e.y = clamp(e.y + ((e.y - g.y) / dd) * 14, e.r, WORLD_SIZE - e.r);
+        // 从爆炸中心向外击退（clamp 世界边界）；boss 免疫爆炸击退
+        if (e.type !== 'boss') {
+          const dd = d || 1;
+          e.x = clamp(e.x + ((e.x - g.x) / dd) * 14, e.r, WORLD_SIZE - e.r);
+          e.y = clamp(e.y + ((e.y - g.y) / dd) * 14, e.r, WORLD_SIZE - e.r);
+        }
         totalDealt += dealt;
         if (e.hp <= 0) killEnemy(e, j);
       }
@@ -1326,14 +1336,25 @@
   }
 
   /* ==================== 摄像机 ==================== */
-  // 摄像机跟随玩家：中心对准玩家，clamp 到世界边界（视野不越界）；idle 时停在世界中心
+  // 检测是否需要拉大视角：触屏设备或窄屏（宽/高 < NARROW_THRESHOLD）→ zoom 0.8
+  function detectZoom() {
+    const touch = ('ontouchstart' in window) ||
+                  (window.navigator && window.navigator.maxTouchPoints > 0);
+    const narrow = window.innerWidth < NARROW_THRESHOLD || window.innerHeight < NARROW_THRESHOLD;
+    return (touch || narrow) ? VIEW_ZOOM_TOUCH : 1;
+  }
+
+  // 摄像机跟随玩家：中心对准玩家，clamp 到世界边界（视野不越界）；idle 时停在世界中心。
+  // 缩放后可见世界范围 = 画布/zoom（如 800/0.8 = 1000px 宽）
   function updateCamera() {
     viewW = _canvas ? _canvas.width : 0;
     viewH = _canvas ? _canvas.height : 0;
+    zoom = detectZoom();
+    const effW = viewW / zoom, effH = viewH / zoom;   // 缩放后的可见世界尺寸
     if (!player) { camX = WORLD_SIZE / 2; camY = WORLD_SIZE / 2; return; }
-    const halfW = viewW / 2, halfH = viewH / 2;
-    camX = viewW >= WORLD_SIZE ? WORLD_SIZE / 2 : clamp(player.x, halfW, WORLD_SIZE - halfW);
-    camY = viewH >= WORLD_SIZE ? WORLD_SIZE / 2 : clamp(player.y, halfH, WORLD_SIZE - halfH);
+    const halfW = effW / 2, halfH = effH / 2;
+    camX = effW >= WORLD_SIZE ? WORLD_SIZE / 2 : clamp(player.x, halfW, WORLD_SIZE - halfW);
+    camY = effH >= WORLD_SIZE ? WORLD_SIZE / 2 : clamp(player.y, halfH, WORLD_SIZE - halfH);
   }
 
   /* ==================== 渲染（每帧调用 FruitGame.Visuals） ==================== */
@@ -1350,9 +1371,11 @@
       _ctx.fillStyle = '#17301c';
       _ctx.fillRect(0, 0, w, h);
     }
-    // 世界内容：摄像机偏移
+    // 世界内容：摄像机偏移 + 中心缩放（zoom 0.8 拉大手机端可见范围；drawBackground 不受影响）
     _ctx.save();
-    _ctx.translate(-camX + w / 2, -camY + h / 2);
+    _ctx.translate(w / 2, h / 2);
+    if (zoom !== 1) _ctx.scale(zoom, zoom);
+    _ctx.translate(-camX, -camY);
     // 宝石
     if (v && typeof v.drawGem === 'function') {
       for (let i = 0; i < gems.length; i++) {

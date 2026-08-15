@@ -1677,7 +1677,7 @@
     // HP
     if (hud.hp != null && hud.maxHp) {
       var hr = clamp(hud.hp / hud.maxHp, 0, 1);
-      setBar('hud-hp-fill', hr, hr > 0.5 ? 'linear-gradient(90deg,#22c55e,#4ade80)' : hr > 0.25 ? 'linear-gradient(90deg,#f59e0b,#ffd23f)' : 'linear-gradient(90deg,#ef4444,#ff5252)');
+      setBar('hud-hp-fill', hr, hr > 0.5 ? 'linear-gradient(90deg,#ef4444,#ff6b6b)' : hr > 0.25 ? 'linear-gradient(90deg,#dc2626,#ef4444)' : 'linear-gradient(90deg,#b91c1c,#dc2626)');
       var ht = $id('hud-hp-text');
       if (ht) ht.textContent = 'HP ' + Math.ceil(hud.hp) + '/' + hud.maxHp;
     }
@@ -1691,7 +1691,7 @@
     }
     // XP
     if (hud.xp != null && hud.xpMax) {
-      setBar('hud-xp-fill', hud.xp / hud.xpMax, 'linear-gradient(90deg,#d97706,#ffd23f)');
+      setBar('hud-xp-fill', hud.xp / hud.xpMax, 'linear-gradient(90deg,#2563eb,#60a5fa)');
       var xt = $id('hud-xp-text');
       if (xt) xt.textContent = hud.xp + '/' + hud.xpMax;
     }
