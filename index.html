@@ -71,6 +71,28 @@
   .hud-right { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; text-align: right; }
   .hidden { display: none !important; }
 
+  /* ── Boss 血条（core 契约：#boss-bar 容器 / #boss-fill 填充 / #boss-name 名称） ── */
+  #boss-bar {
+    position: fixed; top: calc(10px + env(safe-area-inset-top)); left: 50%; transform: translateX(-50%);
+    z-index: 12; display: none; flex-direction: column; align-items: center; gap: 3px;
+    width: min(420px, 62vw); pointer-events: none;
+  }
+  #boss-name {
+    font-size: 15px; font-weight: 900; color: #ffd23f; letter-spacing: 4px;
+    text-shadow: 0 1px 4px rgba(0,0,0,.95), 0 0 14px rgba(255, 90, 40, .8);
+  }
+  .boss-fill-wrap {
+    width: 100%; height: 12px; border-radius: 7px; overflow: hidden;
+    background: rgba(0, 0, 0, 0.55); border: 1px solid rgba(255, 210, 63, 0.55);
+    box-shadow: 0 0 14px rgba(255, 120, 40, 0.35);
+  }
+  #boss-fill {
+    height: 100%; width: 0%; border-radius: 7px;
+    background: linear-gradient(90deg, #ff3040, #ff8a3c);
+    box-shadow: 0 0 10px rgba(255, 80, 40, 0.8) inset;
+    transition: width .15s ease-out;
+  }
+
   /* Buff 图标 */
   #stat-buffs {
     position: fixed; left: calc(14px + env(safe-area-inset-left)); bottom: calc(14px + env(safe-area-inset-bottom));
@@ -304,6 +326,12 @@
   </div>
   <div id="stat-buffs"></div>
   <div id="stat-combo" class="hidden"></div>
+
+  <!-- Boss 血条（core 控制显隐与宽度；缺失静默跳过） -->
+  <div id="boss-bar">
+    <span id="boss-name">BOSS</span>
+    <div class="boss-fill-wrap"><div id="boss-fill"></div></div>
+  </div>
 
   <!-- 波次横幅 -->
   <div id="banner" class="hidden">

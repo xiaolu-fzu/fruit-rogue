@@ -12,6 +12,7 @@
  *   const d  = FruitGame.Rogue.difficulty(t)            // 按游戏秒数 t 求难度倍数(≥1)
  *   const gem = FruitGame.Rogue.onEnemyKilled(run, enemy) // 敌人死亡 → {x,y,value} 或 null
  *   const r  = FruitGame.Rogue.onGemPickup(run, gemValue) // 拾取宝石 → {leveledUp,level,xp,xpNeeded}
+ *   const b  = FruitGame.Rogue.applyBossOrb(run)           // 吸收 boss 大光球 → {level,leveledUp:true}（直接升 1 级，xp 归 0）
  *   const opts = FruitGame.Rogue.onLevelUp(run)          // 升级 → 3 个强化选项 [{id,name,desc,icon}]
  *   FruitGame.Rogue.applyUpgrade(run, upgradeId)         // 应用所选强化（永久生效）
  *
@@ -347,7 +348,8 @@
         hp: BASE_STATS.maxHp, // 实时生命（core.js 读写）
         kills: 0,            // 击杀数（core.js 可读）
         time: 0,             // 已存活秒数（core.js 每帧累加）
-        gemsCollected: 0     // 拾取宝石数（统计）
+        gemsCollected: 0,    // 拾取宝石数（统计）
+        bossOrbs: 0          // 吸收的 Boss 大光球数（统计）
       };
       // 深拷贝基础属性，避免共享 BASE_STATS
       run.stats = {};
@@ -444,6 +446,21 @@
       result.xp = Math.floor(run.xp);
       result.xpNeeded = run.xpNeeded;
       return result;
+    },
+
+    /**
+     * 吸收 Boss 大光球：直接升 1 级（level++，xp 归 0，xpNeeded 按曲线更新）。
+     * 返回 {level, leveledUp}——core 拿到 leveledUp=true 后自行调用 onLevelUp(run) 走三选一。
+     * 与 onGemPickup 的"经验积累升级"不同：这是 Boss 奖励的直接升级，
+     * 不消耗已有经验、不受 xpMult 影响，也不触发经验溢出跳级。
+     */
+    applyBossOrb: function (run) {
+      if (!run) return { level: 0, leveledUp: false };
+      run.level += 1;
+      run.xp = 0;
+      run.xpNeeded = xpForLevel(run.level);
+      run.bossOrbs = (run.bossOrbs || 0) + 1;
+      return { level: run.level, leveledUp: true };
     },
 
     /**

@@ -52,6 +52,14 @@
  * 14. 武器特效传参（t9）：drawBullet(ctx,x,y,r,opts) 传 opts.kind ∈
  *     {'blaster','boomerang','pineapple','orange','split','spitterShot'}，
  *     回旋镖/榴弹另传 opts.angle 旋转角
+ * 15. 波次系统（t13，清怪模式）：每波配额 = 6 + wave×3，波内从视野外生成直到配额；
+ *     配额生成完且场上敌人清空 → 波间间隔 1.6s → wave+1；种类池随波次解锁
+ *     （波2+精英 / 波3+蜂群 / 波4+远程 / 波5+重甲），boss 每 3 波 1 个（计入配额）；
+ *     画布横幅"第 N 波"+ HUD #hud-wave；difficulty(t) 继续管敌人强度
+ * 16. 子弹朝向与枪口（t13）：能量弹/橙子弹记录飞行角 angle，从玩家枪口（边缘）
+ *     发射，drawBullet 传 opts.angle（朝向）；boss 血量 = (1000+wave×150)×难度缩放；
+ *     #boss-bar 血条；boss 死亡掉落大光球（不被磁吸，靠近吸收 →
+ *     Rogue.applyBossOrb 升级三选一，接口缺失降级 onGemPickup）
  *
  * ── 与契约的偏差/说明（详见文末）──────────────────────────
  *   A. init 增加可选第二参数 run（满足「依赖注入」描述；不传则内部 makeRun）
@@ -66,6 +74,9 @@
  *      分裂弹 50% 伤害为 core 侧表现参数，不二次分裂防指数爆炸
  *   H. 世界边界角落处（视野已贴世界边缘）敌人会在视野内生成（自然可见的边界现象）；
  *      spitter 不近身碰撞，伤害全部来自其弹丸
+ *   I. 波次系统取代原时间驱动生成：敌人类型解锁改由波次门槛控制（原 appearAt 时间
+ *      门槛废弃）；boss 改由"每 3 波 1 个"驱动（原 60s/90s 定时出场废弃）；
+ *      波间间隔内不生成敌人（清怪模式）；swarm 成群补员可能使实际生成数略超配额
  * ============================================================
  */
 
@@ -118,6 +129,10 @@
    *   #hud-time         —— 存活时间文本（秒）
    *   #hud-weapon       —— 当前武器文本（如 "🍉 西瓜回旋镖"）（可选，缺失跳过）
    *   #hud-weapons      —— 武器列表文本，当前武器带 ▶ 标记（可选，缺失跳过）
+   *   #hud-wave         —— 当前波次文本（如 "第 3 波"）（可选，缺失跳过）
+   *   #boss-bar         —— boss 血条容器（core 控制显隐；可选，缺失跳过）
+   *   #boss-fill        —— boss 血条填充元素（core 设置宽度百分比）
+   *   #boss-name        —— boss 名称文本（可选）
    * 升级卡片结构：<div class="upgrade-card" data-id="...">
    *                 <div class="uc-icon">🍊</div><div class="uc-name">..</div>
    *                 <div class="uc-desc">..</div></div>
@@ -135,29 +150,36 @@
   const HIT_FLASH = 0.12;       // 受击闪白时长（秒）
   const CONTACT_CD = 0.8;       // 单个敌人对玩家的碰撞伤害冷却（秒）
   const SPAWN_MARGIN = 80;      // 敌人出生点超出玩家视野边缘的距离（像素）
-  const SPAWN_BASE = 1.05;      // 波次基础生成间隔（秒），实际间隔 = SPAWN_BASE / 难度
-  const BOSS_FIRST_AT = 60;     // 首个 Boss 出场时间（秒）
-  const BOSS_EVERY = 90;        // 之后每隔 N 秒再出 1 个 Boss
+  const SPAWN_BASE = 1.05;      // 波内生成间隔（秒），实际间隔 = SPAWN_BASE / 难度
+  const WAVE_QUOTA_BASE = 6;    // 每波基础敌人配额
+  const WAVE_QUOTA_PER = 3;     // 每波递增配额（配额 = 6 + wave×3）
+  const WAVE_INTERVAL = 1.6;    // 波间间隔（秒）：清完一波后短暂休息
+  const BOSS_EVERY_WAVES = 3;   // 每 N 波出一个 boss（计入当波配额）
+  const BOSS_HP_BASE = 1000;    // boss 基础血量（另加 wave×150 随波次增长）
+  const BOSS_HP_PER_WAVE = 150;
   const MAX_BOSS = 2;           // 场上同时存在的 Boss 数量上限
   const MAX_ENEMIES = 320;      // 场上敌人上限
   const MAX_GEMS = 400;         // 场上宝石上限（超出丢最旧的）
   const MAX_BULLETS = 400;      // 场上投射物上限（超出丢最旧的）
   const MAX_SHOTS = 200;        // 敌方弹丸上限（spitter 发射）
+  const MAX_ORBS = 8;           // 场上大光球上限（boss 掉落）
   const MAX_PARTICLES = 600;    // 粒子上限（超出丢最旧的）
   const OUT_MARGIN = 80;        // 投射物飞出世界范围后回收
   const SWITCH_TOAST = 1.2;     // 切换武器提示的显示时长（秒）
+  const ORB_R = 22;             // boss 大光球半径
+  const ORB_ABSORB = 55;        // 大光球被玩家吸收的距离（像素）
 
   // 敌人类型基准配置（type 供 drawEnemy 区分造型，gemValue 供 rogue 的 onEnemyKilled
-  // 读取决定宝石价值；appearAt 为出现时间门槛（秒），weight 为随机权重，非 0 才参与随机）
+  // 读取决定宝石价值；weight 为随机权重，出现门槛由波次控制（见 pickEnemyType））
   const ENEMY_TYPES = {
-    normal:  { r: 16, hp: 12,  speed: 58,  damage: 8,  gemValue: 1,  weight: 1.0, appearAt: 0 },
-    fast:    { r: 12, hp: 7,   speed: 118, damage: 6,  gemValue: 1,  weight: 0.9, appearAt: 0 },
-    elite:   { r: 30, hp: 70,  speed: 44,  damage: 18, gemValue: 10, weight: 0.0, appearAt: 0 },
-    boss:    { r: 46, hp: 320, speed: 36,  damage: 30, gemValue: 45, weight: 0.0, appearAt: 0 },
-    // 新增 3 种（t9）：蜂群/重甲/远程，按时间门槛解锁
-    swarm:   { r: 10, hp: 4,   speed: 96,  damage: 5,  gemValue: 1,  weight: 1.4, appearAt: 30 },  // 小/脆/快/成群
-    tank:    { r: 34, hp: 150, speed: 30,  damage: 22, gemValue: 12, weight: 0.22, appearAt: 60 }, // 大/慢/厚/痛
-    spitter: { r: 20, hp: 30,  speed: 44,  damage: 10, gemValue: 6,  weight: 0.30, appearAt: 90 }, // 远程，弹丸伤人
+    normal:  { r: 16, hp: 12,  speed: 58,  damage: 8,  gemValue: 1,  weight: 1.0 },
+    fast:    { r: 12, hp: 7,   speed: 118, damage: 6,  gemValue: 1,  weight: 0.9 },
+    elite:   { r: 30, hp: 70,  speed: 44,  damage: 18, gemValue: 10, weight: 0.35 },
+    boss:    { r: 46, hp: 320, speed: 36,  damage: 30, gemValue: 45, weight: 0.0 },
+    // t9 新增：蜂群/重甲/远程，随波次解锁
+    swarm:   { r: 10, hp: 4,   speed: 96,  damage: 5,  gemValue: 1,  weight: 1.4 },   // 小/脆/快/成群
+    tank:    { r: 34, hp: 150, speed: 30,  damage: 22, gemValue: 12, weight: 0.25 },  // 大/慢/厚/痛
+    spitter: { r: 20, hp: 30,  speed: 44,  damage: 10, gemValue: 6,  weight: 0.30 },  // 远程，弹丸伤人
   };
 
   // ==================== 武器配置（核心玩法侧特质参数） ====================
@@ -217,10 +239,17 @@
   let camX = WORLD_SIZE / 2;   // 摄像机世界坐标 X（每帧跟随玩家，clamp 到世界边界）
   let camY = WORLD_SIZE / 2;   // 摄像机世界坐标 Y
   let viewW = 0, viewH = 0;    // 视野尺寸（= 画布尺寸）
+  let wave = 1;                // 当前波次（从 1 开始）
+  let waveQuota = 0;           // 当前波敌人配额（6 + wave×3）
+  let waveSpawned = 0;         // 当前波已生成数量
+  let waveState = 'spawning';  // 'spawning' 波内生成 / 'clearing' 已生成完等清场 / 'intermission' 波间间隔
+  let waveTimer = 0;           // 波间间隔倒计时（秒）
+  let waveBannerText = '';     // 波次横幅文本（画布提示）
+  let waveBannerUntil = 0;     // 横幅消失时间（性能时钟）
+  let bossOrbs = [];           // boss 大光球数组（不被磁吸，靠近吸收）
   let keys = new Set();        // 当前按下的按键集合
-  let spawnTimer = 0;          // 波次生成倒计时
+  let spawnTimer = 0;          // 波内生成倒计时
   let fireTimer = 0;           // 射击冷却倒计时
-  let bossNextAt = BOSS_FIRST_AT; // 下一次 Boss 出场时间（秒，相对 run.time）
   let curWeapon = 'blaster';   // 当前武器 id（数字键 1-4 切换，仅限 run.weapons 已解锁）
   let lastSwitchAt = -10;      // 上次切换武器的时间（秒，用于画布提示）
   let touchVec = { x: 0, y: 0 }; // 触控移动向量（虚拟摇杆，setTouchMove 写入）
@@ -262,17 +291,16 @@
     };
   }
 
-  // 随机挑选敌人类型：精英概率随时间上升；swarm/tank/spitter 按时间门槛解锁并参与权重
+  // 随机挑选敌人类型：随波次解锁种类池（波2+精英 / 波3+蜂群 / 波4+远程 / 波5+重甲）
   function pickEnemyType() {
-    if (Math.random() < Math.min(0.3, 0.04 + run.time / 300)) return 'elite';
     const cands = [
       { t: 'normal', w: ENEMY_TYPES.normal.weight },
       { t: 'fast', w: ENEMY_TYPES.fast.weight },
     ];
-    for (const key of ['swarm', 'tank', 'spitter']) {
-      const cfg = ENEMY_TYPES[key];
-      if (run.time >= cfg.appearAt) cands.push({ t: key, w: cfg.weight });
-    }
+    if (wave >= 2) cands.push({ t: 'elite', w: ENEMY_TYPES.elite.weight });
+    if (wave >= 3) cands.push({ t: 'swarm', w: ENEMY_TYPES.swarm.weight });
+    if (wave >= 4) cands.push({ t: 'spitter', w: ENEMY_TYPES.spitter.weight });
+    if (wave >= 5) cands.push({ t: 'tank', w: ENEMY_TYPES.tank.weight });
     let total = 0;
     for (let i = 0; i < cands.length; i++) total += cands[i].w;
     let r = Math.random() * total;
@@ -304,7 +332,10 @@
     const type = forcedType || pickEnemyType();
     const base = ENEMY_TYPES[type] || ENEMY_TYPES.normal;
     const p = (fx != null && fy != null) ? { x: fx, y: fy } : pickSpawnPos();
-    // 血量：baseHp × difficulty(t) × (1 + 0.12×floor(t/45))（难度缩放 + 时间线性增长）
+    // 血量：baseHp × difficulty(t) × (1 + 0.12×floor(t/45))（难度缩放 + 时间线性增长）；
+    // boss 另按波次增长：基础 = 1000 + wave×150
+    let baseHp = base.hp;
+    if (type === 'boss') baseHp = BOSS_HP_BASE + wave * BOSS_HP_PER_WAVE;
     const hpScale = dif * (1 + 0.12 * Math.floor(run.time / 45));
     const spScale = Math.min(1 + (dif - 1) * 0.12, 1.7);
     const dmScale = 1 + (dif - 1) * 0.5;
@@ -313,8 +344,8 @@
       type: type,
       x: clamp(p.x, 0, WORLD_SIZE), y: clamp(p.y, 0, WORLD_SIZE),
       r: base.r,
-      hp: base.hp * hpScale,
-      maxHp: base.hp * hpScale,
+      hp: baseHp * hpScale,
+      maxHp: baseHp * hpScale,
       speed: base.speed * spScale * rand(0.9, 1.1),
       damage: base.damage * dmScale,
       gemValue: base.gemValue,   // 宝石价值，rogue 的 onEnemyKilled 直接读取
@@ -326,19 +357,23 @@
     });
   }
 
-  // 常规生成入口：类型随机 + swarm 成群补充（蜂群感）
+  // 常规生成入口：类型随机 + swarm 成群补充（蜂群感）；返回本批实际生成数量（配额统计用）
   function spawnEnemy(dif) {
-    if (enemies.length >= MAX_ENEMIES) return;
+    if (enemies.length >= MAX_ENEMIES) return 0;
     const type = pickEnemyType();
     const p = pickSpawnPos();
+    let n = 0;
     spawnEnemyAt(dif, type, p.x, p.y);
+    n++;
     // swarm 成群：同出生点附近补 1-2 只
     if (type === 'swarm') {
       const extra = 1 + Math.floor(Math.random() * 2);
       for (let k = 0; k < extra && enemies.length < MAX_ENEMIES; k++) {
         spawnEnemyAt(dif, 'swarm', p.x + rand(-34, 34), p.y + rand(-34, 34));
+        n++;
       }
     }
+    return n;
   }
 
   // 投射物工厂：bullets 数组统一存放三种投射物（kind: 'bullet'|'boomerang'|'grenade'）
@@ -348,13 +383,15 @@
   }
 
   // 能量弹（blaster / orange 共用直线弹逻辑）；vis 为视觉 kind（'blaster'|'orange'）
+  // 发射点从枪口（玩家边缘）出发，angle 记录飞行朝向（绘制/拖尾用）
   function spawnBullet(angle, damage, pierce, crit, size, radiusMult, speedMult, vis) {
     const rad = BULLET_R * (size > 0 ? size : 1) * radiusMult;   // 半径 = 基础 × bulletSize × 武器倍率
     pushProjectile({
       kind: 'bullet',
       vis: vis || 'blaster',   // 绘制特效区分用
-      x: player.x + Math.cos(angle) * (player.r + 8),
-      y: player.y + Math.sin(angle) * (player.r + 8),
+      angle: angle,            // 飞行朝向角（atan2(vx,vy)）
+      x: player.x + Math.cos(angle) * player.r,   // 枪口：玩家位置 + 朝向 × 玩家半径
+      y: player.y + Math.sin(angle) * player.r,
       vx: Math.cos(angle) * BULLET_SPEED * speedMult,
       vy: Math.sin(angle) * BULLET_SPEED * speedMult,
       r: rad,
@@ -374,7 +411,8 @@
     pushProjectile({
       kind: 'boomerang',
       vis: 'boomerang',          // 绘制 kind（约定值）
-      x: player.x + Math.cos(angle) * (player.r + 10),
+      angle: angle,              // 投掷方向角（回旋镖朝向）
+      x: player.x + Math.cos(angle) * player.r,
       y: player.y + Math.sin(angle) * (player.r + 10),
       vx: Math.cos(angle) * BULLET_SPEED * weapon.speed,
       vy: Math.sin(angle) * BULLET_SPEED * weapon.speed,
@@ -398,7 +436,8 @@
     pushProjectile({
       kind: 'grenade',
       vis: 'pineapple',          // 绘制 kind（约定值，榴弹≠'grenade'）
-      x: player.x + Math.cos(angle) * (player.r + 8),
+      angle: angle,              // 投掷方向角
+      x: player.x + Math.cos(angle) * player.r,
       y: player.y + Math.sin(angle) * (player.r + 8),
       vx: Math.cos(angle) * BULLET_SPEED * weapon.speed,
       vy: Math.sin(angle) * BULLET_SPEED * weapon.speed,
@@ -447,26 +486,68 @@
   /* ==================== 波次 / 难度 ==================== */
   // 生成节奏（与 rogue 新难度曲线配合，见 t5 建议）：
   //   count = 1 + floor(run.time/75)：每 75 秒多生成 1 个（原 45 秒，数量降 ~40%）
-  //   间隔下限 0.35s（原 0.25s），避免后期数量爆炸
-  function updateSpawning(dt) {
+  /* ==================== 波次系统（清怪模式） ==================== */
+  // 每波敌人配额固定（6 + wave×3），波内按间隔从视野外生成直到配额；
+  // 配额生成完且场上敌人清空 → 波间间隔 → wave+1 进入下一波。
+  // boss 每 3 波一个（计入配额）；difficulty(t) 继续管敌人强度，不管波次节奏。
+  function currentDif() {
     const r = Rogue();
-    const dif = (r && typeof r.difficulty === 'function') ? r.difficulty(run.time) : 1;
-    spawnTimer -= dt;
-    if (spawnTimer <= 0) {
-      // 间隔随难度缩短（下限 0.35s）；每 75 秒多生成一个敌人（小波次）
-      spawnTimer = Math.max(0.35, SPAWN_BASE / dif);
-      const count = 1 + Math.floor(run.time / 75);
-      for (let i = 0; i < count; i++) spawnEnemy(dif);
-    }
-    // Boss 出场（独立计时，基于 run.time）：60s 首个，之后每 90s 一个，场上最多 MAX_BOSS 个
-    if (run.time >= bossNextAt) {
+    return (r && typeof r.difficulty === 'function') ? r.difficulty(run.time) : 1;
+  }
+
+  // 显示波次横幅（画布顶部大字提示）
+  function showWaveBanner(text) {
+    waveBannerText = text;
+    waveBannerUntil = now() + 1.6;
+  }
+
+  // 开始第 n 波：设置配额、重置生成计数、进入 'spawning'；boss 波额外生成 1 个 boss
+  function beginWave(n) {
+    wave = n;
+    waveQuota = WAVE_QUOTA_BASE + wave * WAVE_QUOTA_PER;
+    waveSpawned = 0;
+    waveState = 'spawning';
+    spawnTimer = 0;
+    if (run) run.wave = wave;                 // 同步到 run（供 rogue 参考）
+    showWaveBanner('第 ' + wave + ' 波');
+    // boss 波：每 BOSS_EVERY_WAVES 波 1 个 boss（计入配额，场上最多 MAX_BOSS）
+    if (wave % BOSS_EVERY_WAVES === 0 && enemies.length < MAX_ENEMIES) {
       let bossCount = 0;
       for (let i = 0; i < enemies.length; i++) if (enemies[i].type === 'boss') bossCount++;
       if (bossCount < MAX_BOSS) {
         const p = pickSpawnPos();
-        spawnEnemyAt(dif, 'boss', p.x, p.y);
+        spawnEnemyAt(currentDif(), 'boss', p.x, p.y);
+        waveSpawned++;
       }
-      bossNextAt += BOSS_EVERY;
+    }
+  }
+
+  // 每帧波次逻辑
+  function updateWave(dt) {
+    if (waveState === 'intermission') {
+      // 波间间隔：不生成任何敌人，倒计时结束进入下一波
+      waveTimer -= dt;
+      if (waveTimer <= 0) beginWave(wave + 1);
+      return;
+    }
+    if (waveState === 'spawning') {
+      // 波内生成：按间隔生成，直到配额用尽
+      spawnTimer -= dt;
+      if (spawnTimer <= 0 && waveSpawned < waveQuota) {
+        spawnTimer = Math.max(0.35, SPAWN_BASE / currentDif());
+        const batch = Math.min(3, waveQuota - waveSpawned);
+        for (let i = 0; i < batch && waveSpawned < waveQuota && enemies.length < MAX_ENEMIES; i++) {
+          waveSpawned += spawnEnemy(currentDif());
+        }
+        if (waveSpawned >= waveQuota) waveState = 'clearing';
+      }
+      return;
+    }
+    // 'clearing'：本波敌人已全部生成，等场上清空 → 波间间隔
+    if (enemies.length === 0) {
+      waveState = 'intermission';
+      waveTimer = WAVE_INTERVAL;
+      showWaveBanner('第 ' + wave + ' 波 完成');
     }
   }
 
@@ -595,6 +676,7 @@
     const a = Math.atan2(player.y - e.y, player.x - e.x);
     const sp = 180;   // 弹丸速度（像素/秒）
     enemyShots.push({
+      angle: a,       // 飞行朝向
       x: e.x + Math.cos(a) * (e.r + 8),
       y: e.y + Math.sin(a) * (e.r + 8),
       vx: Math.cos(a) * sp,
@@ -724,6 +806,7 @@
       pushProjectile({
         kind: 'bullet',
         vis: 'split',                  // 分裂小弹专属视觉
+        angle: a,                      // 散射后的飞行朝向
         x: b.x, y: b.y,
         vx: Math.cos(a) * speed,
         vy: Math.sin(a) * speed,
@@ -764,7 +847,7 @@
     addEffect('explosion', g.x, g.y, g.boomDur || 0.6);
   }
 
-  // 敌人死亡：统计击杀 → 掉落宝石（回调 rogue 决定）→ 爆炸特效
+  // 敌人死亡：统计击杀 → 掉落宝石（回调 rogue 决定）→ boss 额外掉大光球 → 爆炸特效
   function killEnemy(e, index) {
     run.kills = (run.kills || 0) + 1;
     const r = Rogue();
@@ -776,10 +859,54 @@
       const gv = drop.value != null ? drop.value : e.gemValue;
       spawnGem(gx, gy, gv);
     }
+    // boss 额外掉落大光球（不被磁吸，靠近吸收升级）
+    if (e.type === 'boss') spawnBossOrb(e.x, e.y);
     const isBig = (e.type === 'elite' || e.type === 'boss');
     burst(e.x, e.y, isBig ? 22 : 10, isBig ? '#ffcc66' : '#88dd66');
     addEffect('explosion', e.x, e.y, isBig ? 0.7 : 0.45);
     enemies.splice(index, 1);
+  }
+
+  /* ==================== boss 大光球（需求 5） ==================== */
+  // 生成大光球：boss 死亡处，不被磁吸，玩家靠近（< ORB_ABSORB）自动吸收
+  function spawnBossOrb(x, y) {
+    if (bossOrbs.length >= MAX_ORBS) bossOrbs.shift();
+    bossOrbs.push({ x: x, y: y, r: ORB_R, t: 0 });
+  }
+
+  // 吸收大光球：调用 Rogue.applyBossOrb(run) 后走升级三选一；
+  // 接口缺失时降级为 onGemPickup(run, xpNeeded×10) 并清零 xp（避免连续升级）
+  function absorbBossOrb(orb) {
+    const r = Rogue();
+    let leveled = false;
+    if (r && typeof r.applyBossOrb === 'function') {
+      const res = r.applyBossOrb(run) || {};
+      leveled = !!res.leveledUp;
+    } else if (r && typeof r.onGemPickup === 'function') {
+      const need = run.xpNeeded || 1;
+      const res = r.onGemPickup(run, need * 10) || {};
+      run.xp = 0;               // 降级：清零防连续升级
+      leveled = !!res.leveledUp;
+    }
+    burst(orb.x, orb.y, 26, '#ffdd66');
+    addEffect('levelup', orb.x, orb.y, 1.2);
+    if (leveled) {
+      const opts = (r && typeof r.onLevelUp === 'function' && r.onLevelUp(run)) || [];
+      if (opts.length > 0) startUpgradeFlow(opts);
+    }
+  }
+
+  // 更新大光球：脉动动画 + 靠近吸收
+  function updateBossOrbs(dt) {
+    for (let i = bossOrbs.length - 1; i >= 0; i--) {
+      const o = bossOrbs[i];
+      o.t += dt;
+      if (dist(o.x, o.y, player.x, player.y) < ORB_ABSORB) {
+        bossOrbs.splice(i, 1);
+        absorbBossOrb(o);
+        return;   // 吸收可能触发升级暂停，本帧到此为止
+      }
+    }
   }
 
   /* ==================== 玩家受伤 / 死亡 ==================== */
@@ -920,6 +1047,23 @@
     setText('hud-weapons', parts.join('  '));
   }
 
+  // boss 血条：#boss-bar 容器 / #boss-fill 填充 / #boss-name 名称，缺失元素静默跳过
+  function updateBossBar() {
+    let boss = null;
+    for (let i = 0; i < enemies.length; i++) {
+      if (enemies[i].type === 'boss') { boss = enemies[i]; break; }
+    }
+    const bar = el('boss-bar');
+    if (!bar) return;
+    if (!boss) {
+      bar.style.display = 'none';
+      return;
+    }
+    bar.style.display = 'flex';
+    setFill('boss-fill', boss.maxHp ? clamp((boss.hp / boss.maxHp) * 100, 0, 100) : 0);
+    setText('boss-name', 'BOSS');
+  }
+
   function updateHud(stats) {
     score = (run.kills || 0) * 10 + Math.floor(run.time) * 5;
     const maxHp = stats && stats.maxHp ? stats.maxHp : player.maxHp;
@@ -931,7 +1075,9 @@
     setText('hud-xp-text', xp + '/' + xpNeed);
     setText('hud-score', '' + score);
     setText('hud-time', Math.floor(run.time) + 's');
+    setText('hud-wave', '第 ' + wave + ' 波');     // 波次 HUD
     updateHudWeapon();
+    updateBossBar();
   }
 
   // 升级后 maxHp 变化时同步 run.hp（加量不扣量，并 clamp 到 maxHp）
@@ -962,6 +1108,7 @@
     enemies.length = 0;
     bullets.length = 0;
     enemyShots.length = 0;
+    bossOrbs.length = 0;
     gems.length = 0;
     particles.length = 0;
     effects.length = 0;
@@ -976,10 +1123,10 @@
     touchVec.y = 0;
     spawnTimer = 0;
     fireTimer = 0;
-    bossNextAt = BOSS_FIRST_AT;    // Boss 出场计时重置
     score = 0;
     paused = false;
     state = 'playing';
+    beginWave(1);                  // 第 1 波开始（波次系统：配额/清怪/波间间隔）
     hide('start');
     hide('gameover');
     hide('upgrade');
@@ -1010,11 +1157,12 @@
     // 生命回复（regen：每秒回复量，clamp 到 maxHp）
     if (stats.regen > 0) run.hp = Math.min(player.maxHp, run.hp + stats.regen * dt);
     syncHp(stats);
-    updateSpawning(dt);
+    updateWave(dt);
     updatePlayer(dt, stats);
     tryFire(dt, stats);
     updateEnemies(dt);
     updateEnemyShots(dt);
+    updateBossOrbs(dt);
     updateProjectiles(dt, stats);
     if (updateGems(dt, stats)) return;       // 升级暂停：本帧到此为止
     updateParticles(dt);
@@ -1064,12 +1212,27 @@
         const opts = { kind: b.vis || b.kind };
         if (b.kind === 'boomerang') opts.angle = b.t * 14;    // 回旋镖旋转角
         else if (b.kind === 'grenade') opts.angle = b.t * 5;  // 榴弹滚动角
+        else opts.angle = b.angle || 0;                       // 飞行朝向角（blaster/orange/split）
         v.drawBullet(_ctx, b.x, b.y, b.r, opts);
       }
       // 敌方弹丸（spitter 远程攻击）
       for (let i = 0; i < enemyShots.length; i++) {
         const s = enemyShots[i];
-        v.drawBullet(_ctx, s.x, s.y, s.r, { kind: 'spitterShot' });
+        v.drawBullet(_ctx, s.x, s.y, s.r, { kind: 'spitterShot', angle: s.angle || 0 });
+      }
+    }
+    // boss 大光球（需求 5）：drawBossOrb 缺失时用 drawGem 兜底
+    if (bossOrbs.length > 0) {
+      if (v && typeof v.drawBossOrb === 'function') {
+        for (let i = 0; i < bossOrbs.length; i++) {
+          const o = bossOrbs[i];
+          v.drawBossOrb(_ctx, o.x, o.y, o.r, o.t);
+        }
+      } else if (v && typeof v.drawGem === 'function') {
+        for (let i = 0; i < bossOrbs.length; i++) {
+          const o = bossOrbs[i];
+          v.drawGem(_ctx, o.x, o.y, o.r, o.t);
+        }
       }
     }
     // 敌人
@@ -1105,7 +1268,7 @@
       }
     }
     _ctx.restore();
-    // 屏幕覆盖（摄像机 restore 之后）：切换武器提示
+    // 屏幕覆盖（摄像机 restore 之后）：切换武器提示 + 波次横幅
     const tNow = now();
     if (tNow - lastSwitchAt < SWITCH_TOAST) {
       const wp = WEAPONS[curWeapon] || WEAPONS.blaster;
@@ -1117,6 +1280,20 @@
       _ctx.globalAlpha = 1;
       _ctx.textAlign = 'start';
     }
+    // 波次横幅（大号居中提示："第 N 波" / "第 N 波 完成"）
+    if (tNow < waveBannerUntil && waveBannerText) {
+      const alpha = Math.min(1, (waveBannerUntil - tNow) / 0.5);   // 末尾淡出
+      _ctx.globalAlpha = Math.max(0, alpha);
+      _ctx.fillStyle = '#ffd94a';
+      _ctx.font = 'bold 46px sans-serif';
+      _ctx.textAlign = 'center';
+      _ctx.shadowColor = 'rgba(0,0,0,0.6)';
+      _ctx.shadowBlur = 8;
+      _ctx.fillText(waveBannerText, w / 2, h / 2 - 60);
+      _ctx.shadowBlur = 0;
+      _ctx.globalAlpha = 1;
+      _ctx.textAlign = 'start';
+    }
   }
 
   /* ==================== 主循环 ==================== */
@@ -1124,8 +1301,8 @@
     const dt = clamp((tms - _lastTime) / 1000, 0, 0.05);   // 防切后台时间跳变
     _lastTime = tms;
     _visualT += dt;
-    updateCamera();                        // 每帧更新摄像机（渲染前）
     if (state === 'playing' && !paused) update(dt);
+    updateCamera();                        // 更新（含玩家移动）后再取摄像机，渲染无滞后
     render();
     _rafId = requestAnimationFrame(loop);
   }
@@ -1207,6 +1384,7 @@
     enemies.length = 0;
     bullets.length = 0;
     enemyShots.length = 0;
+    bossOrbs.length = 0;
     gems.length = 0;
     particles.length = 0;
     effects.length = 0;
@@ -1238,7 +1416,7 @@
 
   /* ==================== 导出 ==================== */
   NS.Core = {
-    version: '1.2.0',      // v1.2.0：世界地图+摄像机+新敌人+血量增长+武器kind传参（t9）
+    version: '1.3.0',      // v1.3.0：波次系统+子弹朝向枪口+boss血量大增+boss血条+大光球（t13）
     init: init,            // init(canvas, run?)
     start: start,          // start(run?) —— 开始新一局（供按钮/外部接管）
     destroy: destroy,      // 停止并清理
@@ -1247,9 +1425,14 @@
     setWeapon: setWeapon,        // setWeapon(n) —— n=1-4 切换武器（同数字键逻辑，仅已解锁）
     // 调试钩子（测试/调参用，非游戏接口）
     debug: {
-      pickEnemyType: pickEnemyType,   // pickEnemyType() —— 按时间门槛随机类型
+      pickEnemyType: pickEnemyType,   // pickEnemyType() —— 按波次随机类型
       spawnEnemyAt: spawnEnemyAt,     // spawnEnemyAt(dif, type, x, y) —— 指定位置生成敌人
+      beginWave: beginWave,           // beginWave(n) —— 强制开始第 n 波
       get cam() { return { x: camX, y: camY }; },   // 当前摄像机位置
+      get wave() { return wave; },                  // 当前波次
+      get waveState() { return waveState; },        // spawning/clearing/intermission
+      get waveSpawned() { return waveSpawned; },    // 当前波已生成数
+      get waveQuota() { return waveQuota; },        // 当前波配额
     },
     // 只读调试信息
     get state() { return state; },
@@ -1262,9 +1445,11 @@
     get enemies() { return enemies; },
     get bullets() { return bullets; },           // 玩家投射物数组（能量弹/回旋镖/榴弹）
     get enemyShots() { return enemyShots; },     // 敌方弹丸数组（spitter）
+    get bossOrbs() { return bossOrbs; },         // boss 大光球数组
     get gems() { return gems; },
     get effects() { return effects; },           // 特效数组（调试用）
     get camX() { return camX; },                 // 摄像机 X（世界坐标）
     get camY() { return camY; },                 // 摄像机 Y（世界坐标）
+    get wave() { return wave; },                 // 当前波次
   };
 })();

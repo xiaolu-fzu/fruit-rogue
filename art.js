@@ -17,6 +17,7 @@
  *     kind: 'blaster'蓝紫能量弹 | 'boomerang'西瓜旋转刀片 | 'pineapple'菠萝榴弹(尾焰) |
  *           'orange'橙子弹丸曳光 | 'split'分裂碎片 | 'spitterShot'酸液球 | 'enemy'敌弹
  *   drawParticle(ctx, x, y, r, color)       core 自行控制透明度
+ *   drawBossOrb(ctx, x, y, r, t)            boss 死亡掉落的大光球（金色旋转能量球）
  *   drawEffect(ctx, type, x, y, age)        type:'explosion'|'levelup'|'hit'，age 秒
  *
  * ─── 二、扩展接口（可选，供 core / 整合脚本 / 演示使用）────────
@@ -1134,6 +1135,75 @@
     ctx.restore();
   }
 
+  /* ============ Boss 掉落大光球（t14，core 契约 drawBossOrb） ============ */
+  function paintBossOrb(x, y, r, t) {
+    r = r || 12;
+    t = t || 0;
+    var bob = Math.sin(t * 2.2) * 3;
+    var y2 = y + bob;
+    // 地面光晕
+    drawShadow(0, y2 + r * 1.05, r * 1.3, 0.2, 0.5);
+    // 外圈金色光晕（脉动）
+    var pulse = 0.55 + 0.18 * Math.sin(t * 3);
+    glow(x, y2, r * 3.2, '#ffd23f', pulse);
+    glow(x, y2, r * 2.0, '#fff3c9', pulse * 0.8);
+    // 旋转金光射线（8 道）
+    ctx.save();
+    ctx.translate(x, y2);
+    ctx.rotate(t * 1.1);
+    ctx.strokeStyle = 'rgba(255,210,63,0.5)';
+    ctx.lineWidth = 2.5;
+    ctx.lineCap = 'round';
+    for (var i = 0; i < 8; i++) {
+      var a = (i / 8) * TAU;
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(a) * r * 1.4, Math.sin(a) * r * 1.4);
+      ctx.lineTo(Math.cos(a) * r * 2.1, Math.sin(a) * r * 2.1);
+      ctx.stroke();
+    }
+    // 内圈旋转环
+    ctx.strokeStyle = 'rgba(255,247,201,0.85)';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(0, 0, r * 1.5, 0, TAU); ctx.stroke();
+    ctx.restore();
+    // 主球体（金色能量球）
+    ctx.save();
+    ctx.translate(x, y2);
+    ctx.fillStyle = radial(-r * 0.35, -r * 0.4, r * 0.1, r * 1.15, '#ffffff', '#ffb347');
+    ctx.beginPath(); ctx.arc(0, 0, r, 0, TAU); ctx.fill();
+    ctx.lineWidth = 2.5; ctx.strokeStyle = '#8a5a10'; ctx.stroke();
+    // 内部高光（旋转半月）
+    ctx.save();
+    ctx.rotate(t * 2.4);
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.beginPath(); ctx.arc(-r * 0.28, -r * 0.32, r * 0.42, 0, TAU); ctx.fill();
+    ctx.restore();
+    // 环绕星点（2 颗绕行）
+    ctx.fillStyle = '#fff7c9';
+    var s1, sa;
+    for (s1 = 0; s1 < 2; s1++) {
+      sa = t * 3 + (s1 / 2) * Math.PI;
+      ctx.beginPath();
+      ctx.arc(Math.cos(sa) * r * 1.7, Math.sin(sa) * r * 1.7, r * 0.14, 0, TAU);
+      ctx.fill();
+    }
+    ctx.restore();
+    // 顶部闪光十字（周期性）
+    var tw = (t * 1.1) % 1;
+    if (tw < 0.3) {
+      var fa = (0.3 - tw) / 0.3;
+      ctx.save();
+      ctx.globalAlpha = fa * 0.9;
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 2.5;
+      ctx.lineCap = 'round';
+      var L = r * 1.8;
+      ctx.beginPath(); ctx.moveTo(x - L, y2); ctx.lineTo(x + L, y2); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(x, y2 - L); ctx.lineTo(x, y2 + L); ctx.stroke();
+      ctx.restore();
+    }
+  }
+
   /* ============ 特效池 ============ */
   function addEffect(x, y, type, opts) {
     opts = opts || {};
@@ -1881,6 +1951,9 @@
         ctx.fillStyle = color || '#aaddff';
         ctx.beginPath(); ctx.arc(x, y, r || 3, 0, TAU); ctx.fill();
       });
+    },
+    drawBossOrb: function (c, x, y, r, t) {
+      withCtx(c, function () { paintBossOrb(x, y, r, t); });
     },
     drawEffect: function (c, type, x, y, age) {
       withCtx(c, function () { paintContractFx(type, x, y, age); });

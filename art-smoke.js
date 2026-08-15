@@ -132,6 +132,10 @@ var t = 1.5, ctx2 = makeCtx();
 V.drawBackground(ctx2, 960, 540, t);                                   // 旧签名 (ctx,w,h,t)
 V.drawBackground(ctx2, 120, 80, 960, 540, t);                          // 新签名 (ctx,camX,camY,viewW,viewH,t)
 V.drawBackground(ctx2, -340, 200, 960, 540, t);                        // 负摄像机偏移
+// drawBossOrb（t14）
+V.drawBossOrb(ctx2, 480, 260, 14, t);
+V.drawBossOrb(ctx2, 560, 260, 10, t + 1);
+check('drawBossOrb 导出并调用不抛异常', typeof V.drawBossOrb === 'function');
 V.drawPlayer(ctx2, 480, 300, 18, t, { flash: false, invuln: true });
 V.drawPlayer(ctx2, 480, 300, 18, t, { flash: true, invuln: false });
 // 全部 7 种敌人造型
