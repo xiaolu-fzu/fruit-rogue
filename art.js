@@ -771,7 +771,6 @@
       ctx.fillStyle = 'rgba(255,255,255,0.4)';
       ctx.beginPath(); ctx.arc(-r * 0.32, -r * 0.4, r * 0.13, 0, TAU); ctx.fill();
     }
-    ctx.restore();
   }
   function drawEnemyFace(type, r, t, e, phase) {
     var eyeY = -r * 0.12, eyeGap = r * 0.34, eyeR = r * 0.19;
