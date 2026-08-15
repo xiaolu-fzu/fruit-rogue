@@ -5,12 +5,17 @@
  *  全部素材 Canvas 程序化绘制，零外部文件依赖（离线可用）。
  *
  * ─── 一、core.js 契约接口（验收 B9，core 每帧调用，签名严格一致）──
- *   drawBackground(ctx, w, h, t)            绘制整屏背景
+ *   drawBackground(ctx, camX, camY, viewW, viewH, t)  可滚动世界背景（网格+装饰随摄像机）
+ *     兼容旧调用 drawBackground(ctx, w, h, t)（等价 camX=0,camY=0）
  *   drawPlayer(ctx, x, y, r, t, opts)       opts:{flash:受击闪白, invuln:无敌闪烁}
- *   drawEnemy(ctx, x, y, r, t, opts)        opts:{type:'normal'|'fast'|'elite'|'boss', flash}
- *                                           造型映射：normal→葡萄 / fast→流线莓 / elite→榴莲 / boss→暗紫魔王
+ *   drawEnemy(ctx, x, y, r, t, opts)        opts:{type, flash}
+ *     type: 'normal'|'fast'|'elite'|'boss'|'swarm'|'tank'|'spitter'
+ *     造型：normal→葡萄 / fast→流线莓 / elite→榴莲 / boss→暗紫魔王 /
+ *           swarm→蓝莓蜂群 / tank→西瓜坦克 / spitter→酸果吐痰怪
  *   drawGem(ctx, x, y, r, t)
- *   drawBullet(ctx, x, y, r)
+ *   drawBullet(ctx, x, y, r, opts)          opts:{kind, angle(弧度)}
+ *     kind: 'blaster'蓝紫能量弹 | 'boomerang'西瓜旋转刀片 | 'pineapple'菠萝榴弹(尾焰) |
+ *           'orange'橙子弹丸曳光 | 'split'分裂碎片 | 'spitterShot'酸液球 | 'enemy'敌弹
  *   drawParticle(ctx, x, y, r, color)       core 自行控制透明度
  *   drawEffect(ctx, type, x, y, age)        type:'explosion'|'levelup'|'hit'，age 秒
  *
@@ -114,7 +119,6 @@
   var _floats = [];                  // 内部飘字池
   var _effects = [];                 // 内部特效池
   var _shake = 0;                    // 屏幕震动强度
-  var _deco = [];                    // 地板装饰（重绘时生成）
   var _listeners = {};               // 事件
   var _waveTimer = null;             // 波次横幅定时器
   var _hudSig = '';                  // HUD 脏检查签名
@@ -135,7 +139,10 @@
     plum:    { body: ['#ff9db8', '#f06292', '#b02a5f'], dark: '#6e1236' },
     rotten:  { body: ['#a8c46a', '#7d9b52', '#4f6b33'], dark: '#2c4018' },
     boss:    { body: ['#8a6fe0', '#5d3f9e', '#2f1b5e'], dark: '#170b38' },
-    sprinter:{ body: ['#b8f6f8', '#38d0e0', '#0f8fa8'], dark: '#0a4a5c' }
+    sprinter:{ body: ['#b8f6f8', '#38d0e0', '#0f8fa8'], dark: '#0a4a5c' },
+    swarm:   { body: ['#a8d8ff', '#5a9ef0', '#2a5fb0'], dark: '#14355f' },
+    tank:    { body: ['#c8e8a8', '#57b34a', '#1f6e2c'], dark: '#0f3d16' },
+    spitter: { body: ['#f5ff9e', '#d8e05a', '#8a9a22'], dark: '#4a5510' }
   };
 
   /* ============ 生命周期 ============ */
@@ -167,27 +174,36 @@
     // 注意：不修改 canvas.width/height —— 主循环尺寸由 core.js 负责；
     // 仅在 preview（core 未加载）时由 preview() 自行设置画布物理尺寸。
   }
-  // 按 (w,h) 生成地板装饰（固定种子 → 画面稳定；尺寸变化时重新生成）
-  var _decoW = 0, _decoH = 0;
-  function ensureDeco(w, h) {
-    if (_deco.length && _decoW === w && _decoH === h) return;
-    _decoW = w; _decoH = h;
-    _deco = [];
-    var seed = 20260815;
-    function srand() { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; }
-    var n = Math.round(w * h / 90000);
+  /* ============ 背景（可滚动世界，摄像机驱动） ============ */
+  function getSize() { return { w: W, h: H }; }
+  // 世界格装饰：按世界坐标确定性生成（随摄像机滚动），cell 内 0~2 个装饰点
+  var DECO_CELL = 150;
+  function hash2(a, b) {
+    var h = (a * 374761393 + b * 668265263) | 0;
+    h = (h ^ (h >>> 13)) * 1274126177 | 0;
+    h = h ^ (h >>> 16);
+    return (h >>> 0) / 4294967295;
+  }
+  function decoForCell(cx, cy, out) {
+    var r1 = hash2(cx, cy);
+    if (r1 < 0.45) return;               // 空单元格
+    var n = r1 < 0.75 ? 1 : 2;
     for (var i = 0; i < n; i++) {
-      _deco.push({ x: srand() * w, y: srand() * h, r: 2 + srand() * 5, a: 0.03 + srand() * 0.05 });
+      var r2 = hash2(cx * 3 + i * 7, cy * 5 + i * 11);
+      var r3 = hash2(cx * 13 + i, cy * 17 + i);
+      out.push({
+        wx: cx * DECO_CELL + r2 * DECO_CELL,
+        wy: cy * DECO_CELL + r3 * DECO_CELL,
+        r: 2 + r2 * 5,
+        a: 0.03 + r3 * 0.05
+      });
     }
   }
-  function getSize() { return { w: W, h: H }; }
-
-  /* ============ 背景 ============ */
-  // paintBG(w, h, t, bg) —— 内部实现；core 契约 drawBackground(ctx,w,h,t) 也走这里
-  function paintBG(w, h, t, bg) {
+  // paintBG(w, h, t, bg, camX, camY) —— 内部实现；网格与装饰随 (camX,camY) 滚动
+  function paintBG(w, h, t, bg, camX, camY) {
     bg = bg || {};
     w = w || W; h = h || H;
-    ensureDeco(w, h);
+    camX = camX || 0; camY = camY || 0;
     // 深紫夜空格，中心渐亮
     var g = ctx.createLinearGradient(0, 0, 0, h);
     g.addColorStop(0, '#17102e');
@@ -195,25 +211,51 @@
     g.addColorStop(1, '#1a1030');
     ctx.fillStyle = g;
     ctx.fillRect(0, 0, w, h);
-    // 中央光晕
+    // 中央光晕（视口固定）
     ctx.fillStyle = radial(w * 0.5, h * 0.55, 0, Math.max(w, h) * 0.7, 'rgba(90,50,180,0.20)', 'rgba(0,0,0,0)');
     ctx.fillRect(0, 0, w, h);
-    // 网格
+    // 远处星尘（0.35x 视差，缓慢漂移）
+    ctx.fillStyle = '#ffffff';
+    var px = 0, py = 0, pi = 0;
+    for (pi = 0; pi < 40; pi++) {
+      px = hash2(pi, 7) * w - camX * 0.35;
+      py = hash2(pi, 29) * h - camY * 0.35;
+      px = ((px % w) + w) % w;
+      py = ((py % h) + h) % h;
+      ctx.globalAlpha = 0.05 + hash2(pi, 53) * 0.06;
+      ctx.beginPath(); ctx.arc(px, py, 1 + hash2(pi, 89) * 1.5, 0, TAU); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    // 网格：随摄像机偏移滚动
     if (bg.grid !== false) {
       ctx.strokeStyle = 'rgba(255,255,255,0.045)';
       ctx.lineWidth = 1;
       var step = 48, x, y;
+      var offX = -((camX % step) + step) % step;
+      var offY = -((camY % step) + step) % step;
       ctx.beginPath();
-      for (x = 0; x <= w; x += step) { ctx.moveTo(x, 0); ctx.lineTo(x, h); }
-      for (y = 0; y <= h; y += step) { ctx.moveTo(0, y); ctx.lineTo(w, y); }
+      for (x = offX; x <= w; x += step) { ctx.moveTo(x, 0); ctx.lineTo(x, h); }
+      for (y = offY; y <= h; y += step) { ctx.moveTo(0, y); ctx.lineTo(w, y); }
       ctx.stroke();
     }
-    // 地板装饰点
+    // 世界格装饰：只画视口内的格子，位置随摄像机滚动
     ctx.fillStyle = '#ffffff';
-    for (var i = 0; i < _deco.length; i++) {
-      var d = _deco[i];
+    var cellW = DECO_CELL, cellH = DECO_CELL;
+    var cx0 = Math.floor(camX / cellW), cy0 = Math.floor(camY / cellH);
+    var cx1 = Math.floor((camX + w) / cellW), cy1 = Math.floor((camY + h) / cellH);
+    var deco = [];
+    var cxi, cyi;
+    for (cxi = cx0; cxi <= cx1; cxi++) {
+      for (cyi = cy0; cyi <= cy1; cyi++) {
+        decoForCell(cxi, cyi, deco);
+      }
+    }
+    for (var di = 0; di < deco.length; di++) {
+      var d = deco[di];
+      var sx = d.wx - camX, sy = d.wy - camY;
+      if (sx < -10 || sx > w + 10 || sy < -10 || sy > h + 10) continue;
       ctx.globalAlpha = d.a;
-      ctx.beginPath(); ctx.arc(d.x, d.y, d.r, 0, TAU); ctx.fill();
+      ctx.beginPath(); ctx.arc(sx, sy, d.r, 0, TAU); ctx.fill();
     }
     ctx.globalAlpha = 1;
     // 氛围染色
@@ -223,7 +265,7 @@
       ctx.fillRect(0, 0, w, h);
       ctx.globalAlpha = 1;
     }
-    // 四周暗角
+    // 四周暗角（视口固定）
     var vg = ctx.createRadialGradient(w * 0.5, h * 0.5, Math.min(w, h) * 0.42, w * 0.5, h * 0.5, Math.max(w, h) * 0.72);
     vg.addColorStop(0, 'rgba(0,0,0,0)');
     vg.addColorStop(1, 'rgba(0,0,0,0.55)');
@@ -665,6 +707,69 @@
       // 高光
       ctx.fillStyle = 'rgba(255,255,255,0.45)';
       ctx.beginPath(); ctx.arc(-r * 0.3, -r * 0.42, r * 0.14, 0, TAU); ctx.fill();
+    } else if (type === 'swarm') {
+      // 小蓝莓蜂群：本体 + 环绕小点（群体感）
+      ctx.fillStyle = cols.body[1];
+      ctx.lineWidth = 2; ctx.strokeStyle = OUTLINE;
+      var si;
+      for (si = 0; si < 3; si++) {
+        var sa = t * 3 + (si / 3) * TAU + phase;
+        var ox = Math.cos(sa) * r * 1.5, oy = Math.sin(sa) * r * 1.5;
+        var orr = r * 0.22;
+        // 拖尾小点
+        ctx.globalAlpha = 0.5;
+        ctx.beginPath(); ctx.arc(ox * 0.72, oy * 0.72, orr * 0.8, 0, TAU); ctx.fill();
+        ctx.globalAlpha = 1;
+        ctx.beginPath(); ctx.arc(ox, oy, orr, 0, TAU); ctx.fill(); ctx.stroke();
+      }
+      ctx.fillStyle = 'rgba(255,255,255,0.4)';
+      ctx.beginPath(); ctx.arc(-r * 0.3, -r * 0.4, r * 0.13, 0, TAU); ctx.fill();
+    } else if (type === 'tank') {
+      // 大西瓜坦克：深绿 + 条纹 + 装甲底边
+      ctx.lineWidth = 2.5; ctx.strokeStyle = cols.dark;
+      ctx.globalAlpha = 0.55;
+      var tk;
+      for (tk = -2; tk <= 2; tk++) {
+        ctx.beginPath();
+        ctx.moveTo(tk * r * 0.35, -r * 0.92);
+        ctx.quadraticCurveTo(tk * r * 0.55 + r * 0.15, 0, tk * r * 0.35, r * 0.92);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+      // 底部装甲带（铆钉）
+      ctx.fillStyle = cols.dark;
+      ctx.beginPath();
+      ctx.moveTo(-r * 0.8, r * 0.45);
+      ctx.quadraticCurveTo(0, r * 0.95, r * 0.8, r * 0.45);
+      ctx.lineTo(r * 0.8, r * 0.72);
+      ctx.quadraticCurveTo(0, r * 1.15, -r * 0.8, r * 0.72);
+      ctx.closePath(); ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,0.55)';
+      ctx.beginPath(); ctx.arc(-r * 0.35, -r * 0.42, r * 0.16, 0, TAU); ctx.fill();
+    } else if (type === 'spitter') {
+      // 酸果吐痰怪：头顶小刺 + 口水滴（面部大嘴在 face 中画）
+      ctx.fillStyle = cols.body[1];
+      ctx.lineWidth = 2; ctx.strokeStyle = OUTLINE;
+      var spk;
+      for (spk = 0; spk < 5; spk++) {
+        var spa = -Math.PI + (spk / 4) * Math.PI * 0.9 - 0.45;
+        ctx.save();
+        ctx.rotate(spa);
+        ctx.beginPath();
+        ctx.moveTo(-r * 0.12, -r * 0.85);
+        ctx.lineTo(0, -r * 1.18);
+        ctx.lineTo(r * 0.12, -r * 0.85);
+        ctx.closePath(); ctx.fill(); ctx.stroke();
+        ctx.restore();
+      }
+      // 酸液滴（从嘴下方滴落，随时间脉动）
+      var dp = (t * 2.4 + phase) % 1;
+      ctx.fillStyle = '#b8d83a';
+      ctx.beginPath();
+      ctx.ellipse(0, r * 0.55 + dp * r * 0.25, r * 0.09, r * 0.14, 0, 0, TAU); ctx.fill();
+      ctx.strokeStyle = '#4a5510'; ctx.lineWidth = 1.5; ctx.stroke();
+      ctx.fillStyle = 'rgba(255,255,255,0.4)';
+      ctx.beginPath(); ctx.arc(-r * 0.32, -r * 0.4, r * 0.13, 0, TAU); ctx.fill();
     }
     ctx.restore();
   }
@@ -703,7 +808,8 @@
       }
       ctx.closePath(); ctx.fill();
     } else {
-      var angry = type === 'durian' || type === 'rotten' || type === 'sprinter';
+      var angry = type === 'durian' || type === 'rotten' || type === 'sprinter' || type === 'swarm' || type === 'spitter';
+      var sleepy = type === 'plum' || type === 'tank';
       var sleepy = type === 'plum';
       for (si = 0; si < 2; si++) {
         s = si === 0 ? -1 : 1;
@@ -755,6 +861,30 @@
         ctx.moveTo(-r * 0.18, r * 0.38);
         ctx.lineTo(r * 0.18, r * 0.38);
         ctx.stroke();
+      } else if (type === 'tank') {
+        // 笨重西瓜：呆板横线嘴
+        ctx.lineWidth = 2.6;
+        ctx.beginPath();
+        ctx.moveTo(-r * 0.24, r * 0.4);
+        ctx.lineTo(r * 0.24, r * 0.4);
+        ctx.stroke();
+      } else if (type === 'spitter') {
+        // 酸果：大张的嘴 + 利齿 + 酸液内部
+        ctx.fillStyle = '#3f4a0a';
+        ctx.beginPath(); ctx.arc(0, r * 0.42, r * 0.3, 0, Math.PI); ctx.fill();
+        ctx.lineWidth = 2.2; ctx.strokeStyle = OUTLINE; ctx.stroke();
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath();
+        ctx.moveTo(-r * 0.26, r * 0.42);
+        for (var zi2 = 0; zi2 < 3; zi2++) {
+          var zx2 = -r * 0.26 + (zi2 + 0.5) * (r * 0.52 / 3);
+          ctx.lineTo(zx2, r * 0.28);
+          ctx.lineTo(zx2 + r * 0.52 / 6, r * 0.42);
+        }
+        ctx.closePath(); ctx.fill();
+        ctx.fillStyle = '#b8d83a';
+        ctx.beginPath();
+        ctx.ellipse(0, r * 0.34, r * 0.12, r * 0.07, 0, 0, TAU); ctx.fill();
       } else {
         // 葡萄：沮丧下弯嘴
         ctx.beginPath();
@@ -812,12 +942,23 @@
   }
 
   /* ============ 子弹 ============ */
+  /* ============ 子弹（武器弹道视觉区分，t10） ============
+   * kind：blaster 蓝紫能量弹 / boomerang 西瓜旋转刀片 / pineapple 菠萝榴弹(尾焰) /
+   *       orange 橙子弹丸曳光 / split 分裂碎片 / spitterShot 酸液球 / enemy 敌弹
+   * 内部管线读 b.kind、b.angle；无 angle 时由 b.vx/b.vy 推导。
+   */
   function drawBullet(b, t) {
     if (!b) return;
     var r = b.r || 5;
+    // core 传 kind：'bullet'→blaster、'grenade'→pineapple（视觉映射）
+    var kind = b.kind;
+    if (kind === 'bullet') kind = 'blaster';
+    else if (kind === 'grenade') kind = 'pineapple';
+    if (!kind) kind = (b.friendly === false ? 'enemy' : 'blaster');
+    var ang = b.angle != null ? b.angle : ((b.vx || b.vy) ? Math.atan2(b.vy || 0, b.vx || 0) : 0);
     ctx.save();
     ctx.translate(b.x, b.y);
-    if (b.friendly === false) {
+    if (kind === 'enemy') {
       // 敌弹：暗紫尖刺弹
       ctx.save();
       ctx.rotate((b.phase || 0) + t * 4);
@@ -835,22 +976,161 @@
       ctx.fillStyle = radial(0, 0, 0, r, '#e3b8ff', '#5e2fd0');
       ctx.beginPath(); ctx.arc(0, 0, r, 0, TAU); ctx.fill();
       ctx.restore();
-    } else {
-      // 友弹：能量弹 + 拖尾
-      var vx = b.vx || 0, vy = b.vy || 0;
-      var tx = -vx * 0.033, ty = -vy * 0.033;
-      var col = b.color || '#35e0ff';
-      var lg = ctx.createLinearGradient(tx, ty, 0, 0);
-      lg.addColorStop(0, 'rgba(0,0,0,0)');
-      lg.addColorStop(1, col);
-      ctx.strokeStyle = lg;
-      ctx.lineWidth = r * 1.6;
+    } else if (kind === 'boomerang') {
+      // 西瓜回旋镖：旋转刀片（瓜皮+红瓤+黑籽），沿飞行方向自旋
+      ctx.save();
+      ctx.rotate(t * 22 + (b.phase || 0));
+      // 瓜皮外弧
+      ctx.beginPath(); ctx.arc(0, 0, r * 1.6, -Math.PI / 2, Math.PI / 2); ctx.closePath();
+      ctx.fillStyle = '#2f8f3f'; ctx.fill();
+      ctx.lineWidth = 2.5; ctx.strokeStyle = '#1d4a24'; ctx.stroke();
+      // 白瓤
+      ctx.beginPath(); ctx.arc(0, 0, r * 1.3, -Math.PI / 2, Math.PI / 2); ctx.closePath();
+      ctx.fillStyle = '#eafbe6'; ctx.fill();
+      // 红瓤
+      ctx.beginPath(); ctx.arc(0, 0, r * 1.05, -Math.PI / 2, Math.PI / 2); ctx.closePath();
+      ctx.fillStyle = '#ff5a6e'; ctx.fill();
+      ctx.lineWidth = 1.5; ctx.strokeStyle = '#8a1a2a'; ctx.stroke();
+      // 黑籽
+      ctx.fillStyle = '#2b1a0e';
+      var s2;
+      for (s2 = -1; s2 <= 1; s2++) {
+        ctx.save();
+        ctx.translate(s2 * r * 0.5, -r * 0.42);
+        ctx.rotate(0.4);
+        ctx.beginPath(); ctx.ellipse(0, 0, r * 0.12, r * 0.26, 0, 0, TAU); ctx.fill();
+        ctx.restore();
+      }
+      // 刀锋白闪（旋转感）
+      ctx.strokeStyle = 'rgba(255,255,255,0.75)';
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(0, 0, r * 1.72, 0, TAU); ctx.stroke();
+      ctx.restore();
+    } else if (kind === 'pineapple') {
+      // 菠萝榴弹：椭圆弹体 + 菱格 + 尾焰（方向 = ang）
+      ctx.save();
+      ctx.rotate(ang);
+      // 尾焰
+      var fl = r * (1.3 + 0.7 * Math.abs(Math.sin(t * 26)));
+      ctx.fillStyle = radial(-r * 0.5, 0, 0, fl, 'rgba(255,220,120,0.95)', 'rgba(255,120,30,0)');
+      ctx.beginPath();
+      ctx.moveTo(-r * 0.75, -r * 0.5);
+      ctx.quadraticCurveTo(-r * 0.75 - fl, 0, -r * 0.75, r * 0.5);
+      ctx.closePath(); ctx.fill();
+      // 弹体
+      ctx.beginPath(); ctx.ellipse(0, 0, r * 1.15, r * 0.85, 0, 0, TAU);
+      ctx.fillStyle = radial(-r * 0.3, -r * 0.3, r * 0.1, r * 1.2, '#ffe9a8', '#d8a21a');
+      ctx.fill();
+      ctx.lineWidth = 2.5; ctx.strokeStyle = '#5a4a10'; ctx.stroke();
+      // 菱格纹理
+      ctx.strokeStyle = 'rgba(120,80,10,0.6)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(-r * 1.1, 0); ctx.lineTo(r * 1.1, 0);
+      ctx.moveTo(0, -r * 0.8); ctx.lineTo(0, r * 0.8);
+      ctx.moveTo(-r * 0.7, -r * 0.55); ctx.lineTo(r * 0.7, r * 0.55);
+      ctx.moveTo(r * 0.7, -r * 0.55); ctx.lineTo(-r * 0.7, r * 0.55);
+      ctx.stroke();
+      // 顶部叶片
+      ctx.fillStyle = '#3fae4a';
+      ctx.strokeStyle = '#1d5a24';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(-r * 0.2, -r * 0.85); ctx.lineTo(0, -r * 1.35); ctx.lineTo(r * 0.2, -r * 0.85);
+      ctx.closePath(); ctx.fill(); ctx.stroke();
+      ctx.restore();
+    } else if (kind === 'orange') {
+      // 橙子连射：橙弹丸 + 曳光长尾
+      ctx.save();
+      ctx.rotate(ang);
+      var tl = r * 5;
+      var lg2 = ctx.createLinearGradient(-tl, 0, 0, 0);
+      lg2.addColorStop(0, 'rgba(255,140,40,0)');
+      lg2.addColorStop(1, 'rgba(255,180,60,0.9)');
+      ctx.strokeStyle = lg2;
+      ctx.lineWidth = r * 1.1;
       ctx.lineCap = 'round';
-      ctx.beginPath(); ctx.moveTo(tx, ty); ctx.lineTo(0, 0); ctx.stroke();
-      glow(0, 0, r * 2.6, col, 0.5);
-      var pulse = 1 + Math.sin(t * 30) * 0.1;
-      ctx.fillStyle = radial(0, 0, 0, r * pulse, '#ffffff', col);
-      ctx.beginPath(); ctx.arc(0, 0, r * pulse, 0, TAU); ctx.fill();
+      ctx.beginPath(); ctx.moveTo(-tl, 0); ctx.lineTo(0, 0); ctx.stroke();
+      // 弹体（水滴形橙弹）
+      ctx.beginPath();
+      ctx.moveTo(r * 1.7, 0);
+      ctx.quadraticCurveTo(r * 0.4, -r * 0.9, -r * 0.9, -r * 0.45);
+      ctx.quadraticCurveTo(-r * 0.55, 0, -r * 0.9, r * 0.45);
+      ctx.quadraticCurveTo(r * 0.4, r * 0.9, r * 1.7, 0);
+      ctx.closePath();
+      ctx.fillStyle = radial(r * 0.3, 0, 0, r * 1.9, '#fff3c9', '#ff9a2a');
+      ctx.fill();
+      ctx.lineWidth = 2; ctx.strokeStyle = '#8a4a10'; ctx.stroke();
+      ctx.restore();
+    } else if (kind === 'split') {
+      // 分裂碎片：三枚小碎牙（白黄），沿弹道散开
+      ctx.save();
+      ctx.rotate(ang);
+      var f;
+      for (f = -1; f <= 1; f++) {
+        ctx.save();
+        ctx.rotate(f * 0.55);
+        ctx.translate(r * 1.25, 0);
+        ctx.beginPath();
+        ctx.moveTo(r * 0.95, 0);
+        ctx.lineTo(0, -r * 0.5);
+        ctx.lineTo(-r * 0.4, 0);
+        ctx.lineTo(0, r * 0.5);
+        ctx.closePath();
+        ctx.fillStyle = f === 0 ? '#fff7c9' : '#ffd23f';
+        ctx.fill();
+        ctx.lineWidth = 1.5; ctx.strokeStyle = '#8a6a10'; ctx.stroke();
+        ctx.restore();
+      }
+      ctx.restore();
+    } else if (kind === 'spitterShot') {
+      // 酸液球：绿色粘稠 + 起泡 + 酸滴拖尾
+      ctx.save();
+      var wob = 1 + Math.sin(t * 14) * 0.08;
+      ctx.scale(1, wob);
+      ctx.fillStyle = radial(-r * 0.3, -r * 0.3, 0, r * 1.2, '#eaff7a', '#7a9420');
+      ctx.beginPath(); ctx.arc(0, 0, r, 0, TAU); ctx.fill();
+      ctx.lineWidth = 2; ctx.strokeStyle = '#3f4a0a'; ctx.stroke();
+      ctx.fillStyle = 'rgba(255,255,255,0.55)';
+      ctx.beginPath(); ctx.arc(-r * 0.3, -r * 0.35, r * 0.2, 0, TAU); ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,0.35)';
+      ctx.beginPath(); ctx.arc(r * 0.35, r * 0.25, r * 0.12, 0, TAU); ctx.fill();
+      ctx.restore();
+      // 酸滴拖尾（沿 -ang）
+      ctx.save();
+      ctx.rotate(ang);
+      var g;
+      for (g = 1; g <= 2; g++) {
+        var gp = ((t * 6 + g) % 3) / 3;
+        ctx.globalAlpha = (1 - gp) * 0.6;
+        ctx.fillStyle = '#9ec93a';
+        ctx.beginPath(); ctx.arc(-r * (1 + gp * 1.9), 0, r * 0.3 * (1 - gp * 0.5), 0, TAU); ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+      ctx.restore();
+    } else {
+      // blaster 蓝紫能量弹（用户要求：别全是蓝光点 → 拉长弹体 + 紫蓝渐变）
+      ctx.save();
+      ctx.rotate(ang);
+      var tl2 = r * 3.4;
+      var lg3 = ctx.createLinearGradient(-tl2, 0, 0, 0);
+      lg3.addColorStop(0, 'rgba(90,60,255,0)');
+      lg3.addColorStop(1, 'rgba(150,120,255,0.85)');
+      ctx.strokeStyle = lg3;
+      ctx.lineWidth = r * 1.2;
+      ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(-tl2, 0); ctx.lineTo(0, 0); ctx.stroke();
+      glow(0, 0, r * 2.1, '#7f6bff', 0.45);
+      // 拉长的能量弹体
+      ctx.beginPath();
+      ctx.moveTo(r * 1.9, 0);
+      ctx.quadraticCurveTo(r * 0.55, -r * 0.95, -r * 0.7, -r * 0.5);
+      ctx.quadraticCurveTo(-r * 0.4, 0, -r * 0.7, r * 0.5);
+      ctx.quadraticCurveTo(r * 0.55, r * 0.95, r * 1.9, 0);
+      ctx.closePath();
+      ctx.fillStyle = radial(r * 0.45, 0, 0, r * 2, '#ffffff', '#7f5cff');
+      ctx.fill();
+      ctx.lineWidth = 1.5; ctx.strokeStyle = '#3a2a8a'; ctx.stroke();
+      ctx.restore();
     }
     ctx.restore();
   }
@@ -1545,7 +1825,17 @@
   FruitGame.Visuals = {
     version: '1.1.0',
     // ===== core.js 契约接口（验收 B9，签名严格一致）=====
-    drawBackground: function (c, w, h, t) { withCtx(c, function () { paintBG(w, h, t, null); }); },
+    // drawBackground(ctx, camX, camY, viewW, viewH, t)（t9 摄像机版）
+    // 兼容旧调用 drawBackground(ctx, w, h, t)（camX=0,camY=0 等价）
+    drawBackground: function (c, a, b, d, e, f) {
+      var camX, camY, viewW, viewH, t;
+      if (e === undefined && f === undefined) {
+        viewW = a; viewH = b; t = d || 0; camX = 0; camY = 0;   // 旧签名 (ctx,w,h,t)
+      } else {
+        camX = a || 0; camY = b || 0; viewW = d; viewH = e; t = f || 0; // 新签名 (ctx,camX,camY,viewW,viewH,t)
+      }
+      withCtx(c, function () { paintBG(viewW, viewH, t, null, camX, camY); });
+    },
     drawPlayer: function (c, x, y, r, t, opts) {
       opts = opts || {};
       withCtx(c, function () {
@@ -1559,10 +1849,14 @@
     },
     drawEnemy: function (c, x, y, r, t, opts) {
       opts = opts || {};
-      // core 契约类型 → 美术造型：normal→葡萄 / fast→流线莓 / elite→榴莲 / boss→暗紫魔王
+      // core 契约类型 → 美术造型：
+      // normal→葡萄 / fast→流线莓 / elite→榴莲 / boss→暗紫魔王 / swarm→蓝莓群 / tank→西瓜坦克 / spitter→酸果
       var type = opts.type === 'fast' ? 'sprinter'
         : opts.type === 'elite' ? 'durian'
         : opts.type === 'boss' ? 'boss'
+        : opts.type === 'swarm' ? 'swarm'
+        : opts.type === 'tank' ? 'tank'
+        : opts.type === 'spitter' ? 'spitter'
         : 'grape';
       withCtx(c, function () {
         drawEnemy({ x: x, y: y, r: r || 16, type: type, boss: type === 'boss', phase: 0, hitTicks: 0, flash: !!opts.flash, dying: false }, t);
@@ -1573,8 +1867,15 @@
         drawGem({ x: x, y: y, r: r || 8, value: Math.max(1, Math.round((r - 6) * 2)), color: (r >= 9 ? '#60a5fa' : '#4ade80'), phase: 0 }, t);
       });
     },
-    drawBullet: function (c, x, y, r) {
-      withCtx(c, function () { drawBullet({ x: x, y: y, r: r || 5, friendly: true, vx: 0, vy: 0 }, clock()); });
+    drawBullet: function (c, x, y, r, opts) {
+      opts = opts || {};
+      // opts: {kind, angle}；kind 视觉映射：bullet→blaster、grenade→pineapple
+      var kind = opts.kind;
+      if (kind === 'bullet') kind = 'blaster';
+      else if (kind === 'grenade') kind = 'pineapple';
+      withCtx(c, function () {
+        drawBullet({ x: x, y: y, r: r || 5, kind: kind, angle: opts.angle, vx: 0, vy: 0 }, clock());
+      });
     },
     drawParticle: function (c, x, y, r, color) {
       withCtx(c, function () {

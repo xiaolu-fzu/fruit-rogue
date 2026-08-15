@@ -310,12 +310,16 @@
   }
 
   // 敌人类型 → 基础宝石价值兜底表（core.js 会为每个敌人带 gemValue，本表仅作安全兜底；
-  // normal/small/mini/fast=1~2、elite=6、boss=20；未知类型走 || 1 兜底，绝不漏掉掉落）
+  // normal/small/mini/fast/swarm=1~2、spitter=4~5、tank=6~7、elite=6、boss=20；
+  // 未知类型走 || 1 兜底，绝不漏掉掉落）
   var GEM_VALUE_BY_TYPE = {
     normal: 1,
     small: 1,
     mini: 1,
     fast: 1,
+    swarm: 1,    // 新增：虫群小怪（数量型）
+    spitter: 4,  // 新增：远程吐痰怪（中价值）
+    tank: 6,     // 新增：坦克肉盾（高价值）
     elite: 6,
     boss: 20
   };

@@ -128,22 +128,34 @@ check('C.init', (function () { try { NS.Core.init(canvasEl); return true; } catc
 
 console.log('== C6 直接调用 7 个绘制函数 ==');
 var t = 1.5, ctx2 = makeCtx();
-V.drawBackground(ctx2, 960, 540, t);
+// drawBackground：新旧两种签名都要兼容
+V.drawBackground(ctx2, 960, 540, t);                                   // 旧签名 (ctx,w,h,t)
+V.drawBackground(ctx2, 120, 80, 960, 540, t);                          // 新签名 (ctx,camX,camY,viewW,viewH,t)
+V.drawBackground(ctx2, -340, 200, 960, 540, t);                        // 负摄像机偏移
 V.drawPlayer(ctx2, 480, 300, 18, t, { flash: false, invuln: true });
 V.drawPlayer(ctx2, 480, 300, 18, t, { flash: true, invuln: false });
-V.drawEnemy(ctx2, 200, 200, 16, t, { type: 'normal', flash: false });
-V.drawEnemy(ctx2, 300, 200, 12, t, { type: 'fast', flash: true });
-V.drawEnemy(ctx2, 400, 200, 30, t, { type: 'elite', flash: false });
-V.drawEnemy(ctx2, 500, 200, 46, t, { type: 'boss', flash: false });
-V.drawEnemy(ctx2, 560, 200, 46, t, { type: 'boss', flash: true });
+// 全部 7 种敌人造型
+var eTypes = ['normal', 'fast', 'elite', 'boss', 'swarm', 'tank', 'spitter'];
+var ex = 120;
+for (var eti = 0; eti < eTypes.length; eti++) {
+  V.drawEnemy(ctx2, ex, 200, 16, t, { type: eTypes[eti], flash: eti % 2 === 1 });
+  ex += 90;
+}
+// 全部子弹 kind（含角度）
+var kinds = ['blaster', 'boomerang', 'pineapple', 'orange', 'split', 'spitterShot', 'enemy', 'grenade', 'bullet'];
+var kx = 100;
+for (var ki = 0; ki < kinds.length; ki++) {
+  V.drawBullet(ctx2, kx, 420, 6, { kind: kinds[ki], angle: 0.5 });
+  kx += 80;
+}
+V.drawBullet(ctx2, 800, 420, 6);                                       // 无 opts → 默认 blaster
 V.drawGem(ctx2, 500, 400, 8, t);
 V.drawGem(ctx2, 550, 400, 10, t);
-V.drawBullet(ctx2, 600, 300, 5);
 V.drawParticle(ctx2, 100, 100, 3, '#aaddff');
 V.drawEffect(ctx2, 'explosion', 300, 300, 0.25);
 V.drawEffect(ctx2, 'levelup', 300, 300, 0.6);
 V.drawEffect(ctx2, 'hit', 300, 300, 0.15);
-check('7 个绘制函数调用不抛异常', true);
+check('7 个绘制函数（新旧签名/7 敌人/7 弹种）调用不抛异常', true);
 
 console.log('== 模拟 Enter 开局 + 泵帧跑主循环 ==');
 press('Enter');                       // idle → start()

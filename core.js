@@ -21,8 +21,11 @@
  *          全部由 getStats 驱动；生命偷取(lifesteal)按实际造成伤害回血；
  *          分裂弹(stats.split>0，上限 3 由 rogue 管)：直线能量弹命中时散射 2 发
  *          50% 伤害小弹（不二次分裂）
- * 4. 敌人：普通/快速/精英/Boss 四种类型（drawEnemy opts.type），从屏幕四边外生成、
- *          追踪玩家、碰撞伤害（含单敌冷却+玩家无敌帧+受击闪白+击退）；Boss 定时出场
+ * 4. 敌人：7 种类型（drawEnemy opts.type）——normal/fast/elite/boss 原有 +
+ *          'swarm'蜂群(30s后，小/脆/快/成群)、'tank'重甲(60s后，大/慢/厚/痛)、
+ *          'spitter'远程(90s后，保持距离发射弹丸，弹丸撞玩家扣血)；
+ *          从玩家视野边缘外生成、追踪/保持距离、碰撞伤害（含单敌冷却+玩家无敌帧+受击闪白+击退）；
+ *          Boss 定时出场；血量 = baseHp×difficulty(t)×(1+0.12×floor(t/45)) 随时间线性增长
  * 5. 波次/难度：生成速率与敌人强度随 run.time 增长（调用 Rogue.difficulty(t)）；
  *          每 75s 多生成 1 个敌人（原 45s，数量降 ~40%），生成间隔下限 0.35s
  * 6. 经验宝石：击杀掉落（Rogue.onEnemyKilled 决定掉落，enemy.gemValue/enemy.type
@@ -43,19 +46,26 @@
  *     · Core.setTouchMove(dx, dy) —— 移动向量 [-1,1]，(0,0) 停止；与键盘输入叠加，
  *       合并后模长 clamp ≤1
  *     · Core.setWeapon(n) —— n=1-4 切换武器（同数字键逻辑，仅已解锁）
+ * 13. 世界地图 + 摄像机（t9）：WORLD_SIZE=2400×2400，玩家出生在世界中心；
+ *     摄像机每帧跟随玩家并 clamp 到世界边界；渲染用 translate(-camX+viewW/2,...)；
+ *     敌人从玩家视野边缘外生成；drawBackground 新签名 (ctx,camX,camY,viewW,viewH,t)
+ * 14. 武器特效传参（t9）：drawBullet(ctx,x,y,r,opts) 传 opts.kind ∈
+ *     {'blaster','boomerang','pineapple','orange','split','spitterShot'}，
+ *     回旋镖/榴弹另传 opts.angle 旋转角
  *
  * ── 与契约的偏差/说明（详见文末）──────────────────────────
  *   A. init 增加可选第二参数 run（满足「依赖注入」描述；不传则内部 makeRun）
  *   B. 状态机在契约三态之外增加 paused 布尔标志（升级选择时暂停更新）
  *   C. 子弹速度/敌人基础属性/波次节奏为 core 侧表现参数（契约字段未包含）
- *   D. 敌人类型共四种 normal/fast/elite/boss（rogue 约定 normal/elite/boss，
- *      fast 为 art 需要的"快速怪"补充类型，敌人都带 gemValue 供 rogue 直接读取）
+ *   D. 敌人类型共七种 normal/fast/elite/boss/swarm/tank/spitter（rogue 约定
+ *      normal/elite/boss，其余为补充类型，敌人都带 gemValue 供 rogue 直接读取）
  *   E. 武器弹道参数（射速倍率/伤害倍率/散射/爆炸半径/回旋镖时长）为 core 侧武器
- *      特质配置，基础数值仍全部来自 getStats；回旋镖/榴弹视觉用现有 drawBullet
- *      + drawEffect 组合实现，未新增 Visuals 接口
+ *      特质配置，基础数值仍全部来自 getStats；回旋镖/榴弹视觉走 drawBullet opts
  *   F. 触控接口 setTouchMove/setWeapon 为手机移植扩展（契约基线为键盘操作）
  *   G. 分裂弹仅作用于直线能量弹（blaster/orange），回旋镖/榴弹为特殊弹道不触发；
  *      分裂弹 50% 伤害为 core 侧表现参数，不二次分裂防指数爆炸
+ *   H. 世界边界角落处（视野已贴世界边缘）敌人会在视野内生成（自然可见的边界现象）；
+ *      spitter 不近身碰撞，伤害全部来自其弹丸
  * ============================================================
  */
 
@@ -116,6 +126,7 @@
 
   /* ==================== 常量与配置（表现参数，玩家数值一律走 getStats） ==================== */
   const TAU = Math.PI * 2;
+  const WORLD_SIZE = 2400;      // 世界边长（2400×2400），玩家出生在世界中心
   const PLAYER_R = 18;          // 玩家身体半径（像素）
   const BULLET_R = 5;           // 子弹基础半径（实际半径 = BULLET_R * stats.bulletSize）
   const BULLET_SPEED = 460;     // 子弹飞行速度（像素/秒）
@@ -123,7 +134,7 @@
   const INVULN_TIME = 0.8;      // 玩家受击后无敌时间（秒）
   const HIT_FLASH = 0.12;       // 受击闪白时长（秒）
   const CONTACT_CD = 0.8;       // 单个敌人对玩家的碰撞伤害冷却（秒）
-  const SPAWN_MARGIN = 42;      // 敌人出生点超出屏幕边缘的距离（像素）
+  const SPAWN_MARGIN = 80;      // 敌人出生点超出玩家视野边缘的距离（像素）
   const SPAWN_BASE = 1.05;      // 波次基础生成间隔（秒），实际间隔 = SPAWN_BASE / 难度
   const BOSS_FIRST_AT = 60;     // 首个 Boss 出场时间（秒）
   const BOSS_EVERY = 90;        // 之后每隔 N 秒再出 1 个 Boss
@@ -131,17 +142,22 @@
   const MAX_ENEMIES = 320;      // 场上敌人上限
   const MAX_GEMS = 400;         // 场上宝石上限（超出丢最旧的）
   const MAX_BULLETS = 400;      // 场上投射物上限（超出丢最旧的）
+  const MAX_SHOTS = 200;        // 敌方弹丸上限（spitter 发射）
   const MAX_PARTICLES = 600;    // 粒子上限（超出丢最旧的）
-  const OUT_MARGIN = 60;        // 投射物飞出该边距后回收
+  const OUT_MARGIN = 80;        // 投射物飞出世界范围后回收
   const SWITCH_TOAST = 1.2;     // 切换武器提示的显示时长（秒）
 
-  // 敌人类型基准配置（强度会乘以 Rogue.difficulty(t) 成长；type 供 drawEnemy 区分造型，
-  // gemValue 供 rogue 的 onEnemyKilled 读取决定宝石价值）
+  // 敌人类型基准配置（type 供 drawEnemy 区分造型，gemValue 供 rogue 的 onEnemyKilled
+  // 读取决定宝石价值；appearAt 为出现时间门槛（秒），weight 为随机权重，非 0 才参与随机）
   const ENEMY_TYPES = {
-    normal: { r: 16, hp: 12,  speed: 58,  damage: 8,  gemValue: 1,  weight: 1.0 },
-    fast:   { r: 12, hp: 7,   speed: 118, damage: 6,  gemValue: 1,  weight: 0.9 },
-    elite:  { r: 30, hp: 70,  speed: 44,  damage: 18, gemValue: 10, weight: 0.0 },
-    boss:   { r: 46, hp: 320, speed: 36,  damage: 30, gemValue: 45, weight: 0.0 },
+    normal:  { r: 16, hp: 12,  speed: 58,  damage: 8,  gemValue: 1,  weight: 1.0, appearAt: 0 },
+    fast:    { r: 12, hp: 7,   speed: 118, damage: 6,  gemValue: 1,  weight: 0.9, appearAt: 0 },
+    elite:   { r: 30, hp: 70,  speed: 44,  damage: 18, gemValue: 10, weight: 0.0, appearAt: 0 },
+    boss:    { r: 46, hp: 320, speed: 36,  damage: 30, gemValue: 45, weight: 0.0, appearAt: 0 },
+    // 新增 3 种（t9）：蜂群/重甲/远程，按时间门槛解锁
+    swarm:   { r: 10, hp: 4,   speed: 96,  damage: 5,  gemValue: 1,  weight: 1.4, appearAt: 30 },  // 小/脆/快/成群
+    tank:    { r: 34, hp: 150, speed: 30,  damage: 22, gemValue: 12, weight: 0.22, appearAt: 60 }, // 大/慢/厚/痛
+    spitter: { r: 20, hp: 30,  speed: 44,  damage: 10, gemValue: 6,  weight: 0.30, appearAt: 90 }, // 远程，弹丸伤人
   };
 
   // ==================== 武器配置（核心玩法侧特质参数） ====================
@@ -193,10 +209,14 @@
   let paused = false;          // 扩展标志：升级选择弹窗打开时暂停游戏更新（state 仍为 playing）
   let player = null;           // 玩家实体
   let enemies = [];            // 敌人数组
-  let bullets = [];            // 子弹数组
+  let bullets = [];            // 玩家投射物数组（能量弹/回旋镖/榴弹）
+  let enemyShots = [];         // 敌方弹丸数组（spitter 发射）
   let gems = [];               // 经验宝石数组
   let particles = [];          // 粒子数组
   let effects = [];            // 特效数组（击杀爆炸/升级光环/受击闪）
+  let camX = WORLD_SIZE / 2;   // 摄像机世界坐标 X（每帧跟随玩家，clamp 到世界边界）
+  let camY = WORLD_SIZE / 2;   // 摄像机世界坐标 Y
+  let viewW = 0, viewH = 0;    // 视野尺寸（= 画布尺寸）
   let keys = new Set();        // 当前按下的按键集合
   let spawnTimer = 0;          // 波次生成倒计时
   let fireTimer = 0;           // 射击冷却倒计时
@@ -233,8 +253,8 @@
   // 玩家实体只存位置/半径/受击状态；实时生命值统一存放在 run.hp（见头部 Rogue 契约）
   function makePlayer(stats) {
     return {
-      x: _canvas.width / 2,
-      y: _canvas.height / 2,
+      x: WORLD_SIZE / 2,      // 出生在世界中心（2400×2400）
+      y: WORLD_SIZE / 2,
       r: PLAYER_R,
       maxHp: stats.maxHp,   // 最近一次读取的 maxHp 缓存（升级后血量同步用）
       invulnUntil: 0,       // 无敌结束时间（秒，性能时钟）
@@ -242,37 +262,56 @@
     };
   }
 
-  // 从屏幕随机一边之外生成一个敌人；dif 为当前难度倍数；forcedType 可强制类型（如 'boss'）
-  function spawnEnemy(dif, forcedType) {
-    if (enemies.length >= MAX_ENEMIES) return;
-    // 类型选择：随时间提高精英怪概率；fast/normal 按权重随机；boss 由波次计时器强制生成
-    let type = forcedType;
-    if (!type) {
-      const eliteChance = Math.min(0.3, 0.04 + (run.time / 300));
-      const roll = Math.random();
-      if (roll < eliteChance) type = 'elite';
-      else {
-        const w = ENEMY_TYPES.normal.weight + ENEMY_TYPES.fast.weight;
-        type = (Math.random() < ENEMY_TYPES.normal.weight / w) ? 'normal' : 'fast';
-      }
+  // 随机挑选敌人类型：精英概率随时间上升；swarm/tank/spitter 按时间门槛解锁并参与权重
+  function pickEnemyType() {
+    if (Math.random() < Math.min(0.3, 0.04 + run.time / 300)) return 'elite';
+    const cands = [
+      { t: 'normal', w: ENEMY_TYPES.normal.weight },
+      { t: 'fast', w: ENEMY_TYPES.fast.weight },
+    ];
+    for (const key of ['swarm', 'tank', 'spitter']) {
+      const cfg = ENEMY_TYPES[key];
+      if (run.time >= cfg.appearAt) cands.push({ t: key, w: cfg.weight });
     }
+    let total = 0;
+    for (let i = 0; i < cands.length; i++) total += cands[i].w;
+    let r = Math.random() * total;
+    for (let i = 0; i < cands.length; i++) {
+      r -= cands[i].w;
+      if (r <= 0) return cands[i].t;
+    }
+    return 'normal';
+  }
+
+  // 出生位置：玩家视野边缘外一圈（不再是固定屏幕四边），并 clamp 到世界边界内
+  function pickSpawnPos() {
+    const vx0 = camX - viewW / 2, vy0 = camY - viewH / 2;
+    const vx1 = camX + viewW / 2, vy1 = camY + viewH / 2;
+    const m = SPAWN_MARGIN;
+    const side = Math.floor(rand(0, 4));
+    let x = 0, y = 0;
+    if (side === 0) { x = rand(vx0 - m, vx1 + m); y = vy0 - m; }
+    else if (side === 1) { x = rand(vx0 - m, vx1 + m); y = vy1 + m; }
+    else if (side === 2) { x = vx0 - m; y = rand(vy0 - m, vy1 + m); }
+    else { x = vx1 + m; y = rand(vy0 - m, vy1 + m); }
+    return { x: clamp(x, 0, WORLD_SIZE), y: clamp(y, 0, WORLD_SIZE) };
+  }
+
+  // 生成一个敌人：dif 为当前难度倍数；forcedType 可强制类型（如 'boss'）；
+  // fx/fy 可指定出生位置（缺省为视野边缘外随机点）
+  function spawnEnemyAt(dif, forcedType, fx, fy) {
+    if (enemies.length >= MAX_ENEMIES) return;
+    const type = forcedType || pickEnemyType();
     const base = ENEMY_TYPES[type] || ENEMY_TYPES.normal;
-    // 强度随难度成长（HP 增长快、移速增长慢、伤害线性）
-    const hpScale = Math.pow(dif, 0.9);
+    const p = (fx != null && fy != null) ? { x: fx, y: fy } : pickSpawnPos();
+    // 血量：baseHp × difficulty(t) × (1 + 0.12×floor(t/45))（难度缩放 + 时间线性增长）
+    const hpScale = dif * (1 + 0.12 * Math.floor(run.time / 45));
     const spScale = Math.min(1 + (dif - 1) * 0.12, 1.7);
     const dmScale = 1 + (dif - 1) * 0.5;
-    // 出生位置：四边外
-    const side = Math.floor(rand(0, 4));
-    const w = _canvas.width, h = _canvas.height, m = SPAWN_MARGIN;
-    let x = 0, y = 0;
-    if (side === 0) { x = rand(-m, w + m); y = -m; }
-    else if (side === 1) { x = rand(-m, w + m); y = h + m; }
-    else if (side === 2) { x = -m; y = rand(-m, h + m); }
-    else { x = w + m; y = rand(-m, h + m); }
     enemies.push({
       id: ++_eidSeq,
       type: type,
-      x: x, y: y,
+      x: clamp(p.x, 0, WORLD_SIZE), y: clamp(p.y, 0, WORLD_SIZE),
       r: base.r,
       hp: base.hp * hpScale,
       maxHp: base.hp * hpScale,
@@ -280,9 +319,26 @@
       damage: base.damage * dmScale,
       gemValue: base.gemValue,   // 宝石价值，rogue 的 onEnemyKilled 直接读取
       hitCd: 0,                  // 对玩家的碰撞伤害冷却
+      fireCd: rand(1.0, 2.2),    // spitter 下次开火倒计时（秒）
+      fireInterval: rand(2.0, 2.6), // spitter 开火间隔（秒）
       flashUntil: 0,             // 受击闪白
       wobble: rand(0, TAU),      // 正弦摆动的相位
     });
+  }
+
+  // 常规生成入口：类型随机 + swarm 成群补充（蜂群感）
+  function spawnEnemy(dif) {
+    if (enemies.length >= MAX_ENEMIES) return;
+    const type = pickEnemyType();
+    const p = pickSpawnPos();
+    spawnEnemyAt(dif, type, p.x, p.y);
+    // swarm 成群：同出生点附近补 1-2 只
+    if (type === 'swarm') {
+      const extra = 1 + Math.floor(Math.random() * 2);
+      for (let k = 0; k < extra && enemies.length < MAX_ENEMIES; k++) {
+        spawnEnemyAt(dif, 'swarm', p.x + rand(-34, 34), p.y + rand(-34, 34));
+      }
+    }
   }
 
   // 投射物工厂：bullets 数组统一存放三种投射物（kind: 'bullet'|'boomerang'|'grenade'）
@@ -291,11 +347,12 @@
     bullets.push(p);
   }
 
-  // 能量弹（blaster / orange 共用直线弹逻辑）
-  function spawnBullet(angle, damage, pierce, crit, size, radiusMult, speedMult) {
+  // 能量弹（blaster / orange 共用直线弹逻辑）；vis 为视觉 kind（'blaster'|'orange'）
+  function spawnBullet(angle, damage, pierce, crit, size, radiusMult, speedMult, vis) {
     const rad = BULLET_R * (size > 0 ? size : 1) * radiusMult;   // 半径 = 基础 × bulletSize × 武器倍率
     pushProjectile({
       kind: 'bullet',
+      vis: vis || 'blaster',   // 绘制特效区分用
       x: player.x + Math.cos(angle) * (player.r + 8),
       y: player.y + Math.sin(angle) * (player.r + 8),
       vx: Math.cos(angle) * BULLET_SPEED * speedMult,
@@ -316,6 +373,7 @@
     const perpX = -Math.sin(angle), perpY = Math.cos(angle);
     pushProjectile({
       kind: 'boomerang',
+      vis: 'boomerang',          // 绘制 kind（约定值）
       x: player.x + Math.cos(angle) * (player.r + 10),
       y: player.y + Math.sin(angle) * (player.r + 10),
       vx: Math.cos(angle) * BULLET_SPEED * weapon.speed,
@@ -339,6 +397,7 @@
     const life = 2.6;   // 榴弹最长飞行时间（秒），到时自动爆炸（等效射程）
     pushProjectile({
       kind: 'grenade',
+      vis: 'pineapple',          // 绘制 kind（约定值，榴弹≠'grenade'）
       x: player.x + Math.cos(angle) * (player.r + 8),
       y: player.y + Math.sin(angle) * (player.r + 8),
       vx: Math.cos(angle) * BULLET_SPEED * weapon.speed,
@@ -403,7 +462,10 @@
     if (run.time >= bossNextAt) {
       let bossCount = 0;
       for (let i = 0; i < enemies.length; i++) if (enemies[i].type === 'boss') bossCount++;
-      if (bossCount < MAX_BOSS) spawnEnemy(dif, 'boss');
+      if (bossCount < MAX_BOSS) {
+        const p = pickSpawnPos();
+        spawnEnemyAt(dif, 'boss', p.x, p.y);
+      }
       bossNextAt += BOSS_EVERY;
     }
   }
@@ -427,9 +489,9 @@
       player.x += (dx * scale) * stats.speed * dt;
       player.y += (dy * scale) * stats.speed * dt;
     }
-    // 限制在画布内
-    player.x = clamp(player.x, player.r, _canvas.width - player.r);
-    player.y = clamp(player.y, player.r, _canvas.height - player.r);
+    // 限制在世界边界内（2400×2400）
+    player.x = clamp(player.x, player.r, WORLD_SIZE - player.r);
+    player.y = clamp(player.y, player.r, WORLD_SIZE - player.r);
   }
 
   // 自动向最近敌人射击（武器相关，射速间隔 = 1/(fireRate × 武器射速倍率)）
@@ -464,24 +526,44 @@
       } else if (weapon.kind === 'grenade') {
         spawnGrenade(angle, damage, crit, size, weapon);
       } else {
-        spawnBullet(angle, damage, pierce, crit, size, weapon.r, weapon.speed);
+        spawnBullet(angle, damage, pierce, crit, size, weapon.r, weapon.speed, curWeapon);
       }
     }
   }
 
   /* ==================== 敌人更新 ==================== */
+  // 各类敌人移动策略：普通系追踪；swarm 快而乱；tank 慢速逼近；spitter 保持距离并远程射击
   function updateEnemies(dt) {
     for (let i = 0; i < enemies.length; i++) {
       const e = enemies[i];
       if (e.hitCd > 0) e.hitCd -= dt;
-      // 追踪玩家
       const dx = player.x - e.x, dy = player.y - e.y;
       const d = Math.sqrt(dx * dx + dy * dy) || 1;
+      if (e.type === 'spitter') {
+        // ── spitter：远程怪，保持 [tooClose, ideal] 距离带，环绕走位 + 开火 ──
+        const tooClose = 150, ideal = 250;
+        let mvx = 0, mvy = 0;
+        if (d > ideal + 10) { mvx = (dx / d) * e.speed; mvy = (dy / d) * e.speed; }          // 靠近
+        else if (d < tooClose) { mvx = -(dx / d) * e.speed * 1.25; mvy = -(dy / d) * e.speed * 1.25; } // 拉开
+        else { mvx = (-dy / d) * e.speed * 0.45; mvy = (dx / d) * e.speed * 0.45; }           // 环绕
+        e.x += mvx * dt;
+        e.y += mvy * dt;
+        // 发射弹丸（射程内）
+        e.fireCd -= dt;
+        if (e.fireCd <= 0 && d < 560) {
+          e.fireCd = e.fireInterval;
+          spawnSpitterShot(e);
+        }
+        // 远程怪不近身碰撞（伤害来自弹丸）
+        continue;
+      }
+      // 追踪玩家（swarm 更快更乱、tank 更慢但更硬）
       e.x += (dx / d) * e.speed * dt;
       e.y += (dy / d) * e.speed * dt;
-      // 轻微正弦摆动，走位不那么直线
-      e.x += Math.cos(run.time * 3 + e.wobble) * 14 * dt;
-      e.y += Math.sin(run.time * 3 + e.wobble) * 14 * dt;
+      // 轻微正弦摆动，走位不那么直线（swarm 摆动更剧烈 → 蜂群乱飞感）
+      const sway = e.type === 'swarm' ? 34 : 14;
+      e.x += Math.cos(run.time * (e.type === 'swarm' ? 7 : 3) + e.wobble) * sway * dt;
+      e.y += Math.sin(run.time * (e.type === 'swarm' ? 7 : 3) + e.wobble) * sway * dt;
       // 与玩家碰撞：按敌人伤害扣血（有冷却 + 玩家无敌帧）
       if (d < player.r + e.r) {
         if (e.hitCd <= 0) { damagePlayer(e.damage, e.x, e.y); e.hitCd = CONTACT_CD; }
@@ -502,6 +584,45 @@
             a.x -= px; a.y -= py; b.x += px; b.y += py;
           }
         }
+      }
+    }
+  }
+
+  /* ==================== 敌方弹丸（spitter 远程攻击） ==================== */
+  // 生成一发敌方弹丸：瞄准玩家当前位置，慢速飞行，撞到玩家造成伤害后消失
+  function spawnSpitterShot(e) {
+    if (enemyShots.length >= MAX_SHOTS) enemyShots.shift();
+    const a = Math.atan2(player.y - e.y, player.x - e.x);
+    const sp = 180;   // 弹丸速度（像素/秒）
+    enemyShots.push({
+      x: e.x + Math.cos(a) * (e.r + 8),
+      y: e.y + Math.sin(a) * (e.r + 8),
+      vx: Math.cos(a) * sp,
+      vy: Math.sin(a) * sp,
+      r: 6,
+      damage: e.damage,   // 伤害 = spitter 的伤害（已按难度缩放）
+      t: 0,
+      life: 2.6,          // 最远约 470px
+    });
+  }
+
+  // 更新敌方弹丸：飞行 / 出界回收 / 撞玩家扣血
+  function updateEnemyShots(dt) {
+    for (let i = enemyShots.length - 1; i >= 0; i--) {
+      const s = enemyShots[i];
+      s.t += dt;
+      s.x += s.vx * dt;
+      s.y += s.vy * dt;
+      if (s.t > s.life ||
+          s.x < -OUT_MARGIN || s.x > WORLD_SIZE + OUT_MARGIN ||
+          s.y < -OUT_MARGIN || s.y > WORLD_SIZE + OUT_MARGIN) {
+        enemyShots.splice(i, 1);
+        continue;
+      }
+      // 撞玩家：扣血（弹丸消耗），受击闪/粒子由 damagePlayer 负责
+      if (dist(s.x, s.y, player.x, player.y) < player.r + s.r) {
+        enemyShots.splice(i, 1);
+        damagePlayer(s.damage, s.x, s.y);
       }
     }
   }
@@ -541,8 +662,9 @@
         // ── 直线飞行（能量弹 / 榴弹）──
         b.x += b.vx * dt;
         b.y += b.vy * dt;
-        const out = b.x < -OUT_MARGIN || b.x > _canvas.width + OUT_MARGIN ||
-                    b.y < -OUT_MARGIN || b.y > _canvas.height + OUT_MARGIN;
+        // 越界判定用世界边界（不是画布尺寸）
+        const out = b.x < -OUT_MARGIN || b.x > WORLD_SIZE + OUT_MARGIN ||
+                    b.y < -OUT_MARGIN || b.y > WORLD_SIZE + OUT_MARGIN;
         if (b.t > b.life || out) {
           if (b.kind === 'grenade') explodeGrenade(b, stats);   // 榴弹到射程/出界 → 爆炸
           bullets.splice(i, 1);
@@ -601,6 +723,7 @@
       const a = baseAngle + (k === 0 ? -scatter : scatter) + (Math.random() - 0.5) * 0.1;
       pushProjectile({
         kind: 'bullet',
+        vis: 'split',                  // 分裂小弹专属视觉
         x: b.x, y: b.y,
         vx: Math.cos(a) * speed,
         vy: Math.sin(a) * speed,
@@ -668,12 +791,12 @@
     run.hp -= amount;
     player.invulnUntil = t + INVULN_TIME;
     player.flashUntil = t + HIT_FLASH;
-    // 击退
+    // 击退（clamp 到世界边界）
     const d = dist(player.x, player.y, fromX, fromY) || 1;
     player.x += ((player.x - fromX) / d) * 22;
     player.y += ((player.y - fromY) / d) * 22;
-    player.x = clamp(player.x, player.r, _canvas.width - player.r);
-    player.y = clamp(player.y, player.r, _canvas.height - player.r);
+    player.x = clamp(player.x, player.r, WORLD_SIZE - player.r);
+    player.y = clamp(player.y, player.r, WORLD_SIZE - player.r);
     burst(player.x, player.y, 14, '#ff8866');
     addEffect('hit', player.x, player.y, 0.35);
     if (run.hp <= 0) { run.hp = 0; gameOver(); }
@@ -838,10 +961,13 @@
     // 重置所有实体
     enemies.length = 0;
     bullets.length = 0;
+    enemyShots.length = 0;
     gems.length = 0;
     particles.length = 0;
     effects.length = 0;
     player = makePlayer(s);
+    camX = WORLD_SIZE / 2;
+    camY = WORLD_SIZE / 2;
     run.hp = s.maxHp;              // 新局满血（run.hp 为实时生命值，core 全权维护）
     player.maxHp = s.maxHp;
     curWeapon = 'blaster';         // 每局默认能量弹（已保证在 run.weapons 中）
@@ -888,6 +1014,7 @@
     updatePlayer(dt, stats);
     tryFire(dt, stats);
     updateEnemies(dt);
+    updateEnemyShots(dt);
     updateProjectiles(dt, stats);
     if (updateGems(dt, stats)) return;       // 升级暂停：本帧到此为止
     updateParticles(dt);
@@ -895,17 +1022,34 @@
     updateHud(stats);
   }
 
+  /* ==================== 摄像机 ==================== */
+  // 摄像机跟随玩家：中心对准玩家，clamp 到世界边界（视野不越界）；idle 时停在世界中心
+  function updateCamera() {
+    viewW = _canvas ? _canvas.width : 0;
+    viewH = _canvas ? _canvas.height : 0;
+    if (!player) { camX = WORLD_SIZE / 2; camY = WORLD_SIZE / 2; return; }
+    const halfW = viewW / 2, halfH = viewH / 2;
+    camX = viewW >= WORLD_SIZE ? WORLD_SIZE / 2 : clamp(player.x, halfW, WORLD_SIZE - halfW);
+    camY = viewH >= WORLD_SIZE ? WORLD_SIZE / 2 : clamp(player.y, halfH, WORLD_SIZE - halfH);
+  }
+
   /* ==================== 渲染（每帧调用 FruitGame.Visuals） ==================== */
+  // 摄像机渲染：背景在屏幕坐标绘制（translate 前，art 按新签名画可见世界区域）；
+  // 世界内容（宝石/投射物/敌方弹丸/敌人/玩家/粒子/特效）在 translate(-camX+viewW/2, ...) 内绘制
   function render() {
     const v = Visuals();
     const w = _canvas.width, h = _canvas.height;
     _ctx.setTransform(1, 0, 0, 1, 0, 0);
+    // 背景：屏幕坐标（新契约 drawBackground(ctx, camX, camY, viewW, viewH, t)）
     if (v && typeof v.drawBackground === 'function') {
-      v.drawBackground(_ctx, w, h, _visualT);
+      v.drawBackground(_ctx, camX, camY, w, h, _visualT);
     } else {
       _ctx.fillStyle = '#17301c';
       _ctx.fillRect(0, 0, w, h);
     }
+    // 世界内容：摄像机偏移
+    _ctx.save();
+    _ctx.translate(-camX + w / 2, -camY + h / 2);
     // 宝石
     if (v && typeof v.drawGem === 'function') {
       for (let i = 0; i < gems.length; i++) {
@@ -913,22 +1057,19 @@
         v.drawGem(_ctx, g.x, g.y, g.r, _visualT + g.age);
       }
     }
-    // 投射物（能量弹 / 回旋镖 / 榴弹）
+    // 玩家投射物：drawBullet 传 opts.kind / opts.angle 供 art 区分武器特效
     if (v && typeof v.drawBullet === 'function') {
       for (let i = 0; i < bullets.length; i++) {
         const b = bullets[i];
-        if (b.kind === 'boomerang') {
-          // 回旋镖视觉：用 drawBullet 画三个旋转点位，模拟"旋转刀片"（无需新增 art 接口）
-          const spin = b.t * 14;                       // 旋转角速度
-          const px = -Math.sin(spin), py = Math.cos(spin);
-          const o = b.r * 0.9;
-          v.drawBullet(_ctx, b.x + px * o, b.y + py * o, b.r * 0.7);
-          v.drawBullet(_ctx, b.x - px * o, b.y - py * o, b.r * 0.7);
-          v.drawBullet(_ctx, b.x, b.y, b.r);
-        } else {
-          // 能量弹 / 榴弹：直接画（榴弹半径更大，命中时另画爆炸特效）
-          v.drawBullet(_ctx, b.x, b.y, b.r);
-        }
+        const opts = { kind: b.vis || b.kind };
+        if (b.kind === 'boomerang') opts.angle = b.t * 14;    // 回旋镖旋转角
+        else if (b.kind === 'grenade') opts.angle = b.t * 5;  // 榴弹滚动角
+        v.drawBullet(_ctx, b.x, b.y, b.r, opts);
+      }
+      // 敌方弹丸（spitter 远程攻击）
+      for (let i = 0; i < enemyShots.length; i++) {
+        const s = enemyShots[i];
+        v.drawBullet(_ctx, s.x, s.y, s.r, { kind: 'spitterShot' });
       }
     }
     // 敌人
@@ -963,7 +1104,8 @@
         v.drawEffect(_ctx, fx.type, fx.x, fx.y, fx.age);
       }
     }
-    // 切换武器提示（短暂浮现于屏幕顶部，无需 DOM）
+    _ctx.restore();
+    // 屏幕覆盖（摄像机 restore 之后）：切换武器提示
     const tNow = now();
     if (tNow - lastSwitchAt < SWITCH_TOAST) {
       const wp = WEAPONS[curWeapon] || WEAPONS.blaster;
@@ -982,6 +1124,7 @@
     const dt = clamp((tms - _lastTime) / 1000, 0, 0.05);   // 防切后台时间跳变
     _lastTime = tms;
     _visualT += dt;
+    updateCamera();                        // 每帧更新摄像机（渲染前）
     if (state === 'playing' && !paused) update(dt);
     render();
     _rafId = requestAnimationFrame(loop);
@@ -1063,6 +1206,7 @@
     score = 0;
     enemies.length = 0;
     bullets.length = 0;
+    enemyShots.length = 0;
     gems.length = 0;
     particles.length = 0;
     effects.length = 0;
@@ -1094,13 +1238,19 @@
 
   /* ==================== 导出 ==================== */
   NS.Core = {
-    version: '1.1.2',      // v1.1.2：生成节奏调整（t5 建议）+ 分裂弹（t6 补充）
+    version: '1.2.0',      // v1.2.0：世界地图+摄像机+新敌人+血量增长+武器kind传参（t9）
     init: init,            // init(canvas, run?)
     start: start,          // start(run?) —— 开始新一局（供按钮/外部接管）
     destroy: destroy,      // 停止并清理
     switchWeapon: switchWeapon,  // switchWeapon(index) —— 数字键 1-4 对应 index 0-3
     setTouchMove: setTouchMove,  // setTouchMove(dx, dy) —— 触控移动向量 [-1,1]，(0,0) 停止
     setWeapon: setWeapon,        // setWeapon(n) —— n=1-4 切换武器（同数字键逻辑，仅已解锁）
+    // 调试钩子（测试/调参用，非游戏接口）
+    debug: {
+      pickEnemyType: pickEnemyType,   // pickEnemyType() —— 按时间门槛随机类型
+      spawnEnemyAt: spawnEnemyAt,     // spawnEnemyAt(dif, type, x, y) —— 指定位置生成敌人
+      get cam() { return { x: camX, y: camY }; },   // 当前摄像机位置
+    },
     // 只读调试信息
     get state() { return state; },
     get paused() { return paused; },
@@ -1110,8 +1260,11 @@
     get weapons() { return run ? (run.weapons || ['blaster']) : ['blaster']; }, // 已解锁武器
     get player() { return player; },             // 玩家实体（调试/镜头用）
     get enemies() { return enemies; },
-    get bullets() { return bullets; },           // 投射物数组（能量弹/回旋镖/榴弹）
+    get bullets() { return bullets; },           // 玩家投射物数组（能量弹/回旋镖/榴弹）
+    get enemyShots() { return enemyShots; },     // 敌方弹丸数组（spitter）
     get gems() { return gems; },
     get effects() { return effects; },           // 特效数组（调试用）
+    get camX() { return camX; },                 // 摄像机 X（世界坐标）
+    get camY() { return camY; },                 // 摄像机 Y（世界坐标）
   };
 })();
