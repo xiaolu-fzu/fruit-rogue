@@ -60,6 +60,13 @@
  *     发射，drawBullet 传 opts.angle（朝向）；boss 血量 = (1000+wave×150)×难度缩放；
  *     #boss-bar 血条；boss 死亡掉落大光球（不被磁吸，靠近吸收 →
  *     Rogue.applyBossOrb 升级三选一，接口缺失降级 onGemPickup）
+ * 17. 击退与激光（t17）：orange 击退力降至 1/4（0.8px，其余 3px/榴弹 14px）；
+ *     第 5 种武器 'laser'（数字键 5 / run.weapons 解锁）：高速直线、伤害×0.5、
+ *     穿透 = stats.pierce+5、命中伤害递减 ×0.8、drawBullet kind='laser'
+ * 18. BOSS 技能系统（t17）：3 个周期技能（3.5-5s 随机，半血后 ×0.75 下限 2.5s）：
+ *     冲击波（drawEffect('shockwave')，范围 210px 内受伤+击退）、扇形弹幕
+ *     （3-5 发 bossShot）、加速冲锋（限速 ≤ boss 速度×2.2 且 < 玩家速度×1.2，
+ *     冲锋后停顿 0.8s）；释放前摇闪白提示；敌人（含 boss）击退/位移 clamp 世界边界
  *
  * ── 与契约的偏差/说明（详见文末）──────────────────────────
  *   A. init 增加可选第二参数 run（满足「依赖注入」描述；不传则内部 makeRun）
@@ -77,6 +84,9 @@
  *   I. 波次系统取代原时间驱动生成：敌人类型解锁改由波次门槛控制（原 appearAt 时间
  *      门槛废弃）；boss 改由"每 3 波 1 个"驱动（原 60s/90s 定时出场废弃）；
  *      波间间隔内不生成敌人（清怪模式）；swarm 成群补员可能使实际生成数略超配额
+ *   J. laser 解锁靠 run.weapons（rogue 强化 push 'laser'），core 默认不持有；
+ *      技能随机释放（非按序）；冲击波为即时范围判定（环形视觉由 art drawEffect
+ *      'shockwave' 表现，缺失时按通用特效绘制兜底）
  * ============================================================
  */
 
@@ -168,6 +178,14 @@
   const SWITCH_TOAST = 1.2;     // 切换武器提示的显示时长（秒）
   const ORB_R = 22;             // boss 大光球半径
   const ORB_ABSORB = 55;        // 大光球被玩家吸收的距离（像素）
+  // BOSS 技能（t17）：周期/冷却/范围/冲锋参数
+  const BOSS_SKILL_MIN = 3.5;   // 技能间隔下限（秒）
+  const BOSS_SKILL_MAX = 5.0;   // 技能间隔上限（秒）
+  const BOSS_SKILL_FAST = 0.75; // 半血后间隔倍率
+  const BOSS_SKILL_FLOOR = 2.5; // 半血后间隔下限（秒）
+  const BOSS_SHOCK_RANGE = 280; // 冲击波命中范围下限（像素；实际 = max(280, boss.r×6)）
+  const BOSS_CHARGE_TIME = [1.0, 1.4]; // 冲锋时长范围（秒）
+  const BOSS_PAUSE_TIME = 0.8;  // 冲锋结束停顿（秒）
 
   // 敌人类型基准配置（type 供 drawEnemy 区分造型，gemValue 供 rogue 的 onEnemyKilled
   // 读取决定宝石价值；weight 为随机权重，出现门槛由波次控制（见 pickEnemyType））
@@ -192,28 +210,36 @@
   //   damage    单发伤害倍率（相对 stats.damage）
   //   spread    多重射击扇形展开角（弧度）；jitter 为每发随机散布
   //   pierceBonus 额外穿透次数（武器固有特性）
-  const WEAPON_ORDER = ['blaster', 'boomerang', 'pineapple', 'orange'];
+  //   knockback 命中击退力（像素，默认 3；orange 特调减小）
+  const WEAPON_ORDER = ['blaster', 'boomerang', 'pineapple', 'orange', 'laser'];
   const WEAPONS = {
     blaster: {
       name: '能量弹', icon: '💥', kind: 'bullet',
-      fireRate: 1.0, speed: 1.0, r: 1.0, damage: 1.0, spread: 0.12, jitter: 0.02, pierceBonus: 0,
+      fireRate: 1.0, speed: 1.0, r: 1.0, damage: 1.0, spread: 0.12, jitter: 0.02, pierceBonus: 0, knockback: 3,
     },
     boomerang: {
       name: '西瓜回旋镖', icon: '🍉', kind: 'boomerang',
-      fireRate: 0.9, speed: 0.8, r: 1.4, damage: 1.0, spread: 0.0, jitter: 0.0, pierceBonus: 2,
+      fireRate: 0.9, speed: 0.8, r: 1.4, damage: 1.0, spread: 0.0, jitter: 0.0, pierceBonus: 2, knockback: 3,
       outDur: 0.6,      // 去程时长（秒），之后进入回程
       maxLife: 2.2,     // 最长飞行时间（秒），超时静默消失
       arc: 34,          // 去程正弦弧线摆动幅度（像素）
     },
     pineapple: {
       name: '菠萝榴弹', icon: '🍍', kind: 'grenade',
-      fireRate: 0.7, speed: 0.45, r: 1.5, damage: 2.5, spread: 0.0, jitter: 0.02, pierceBonus: 0,
+      fireRate: 0.7, speed: 0.45, r: 1.5, damage: 2.5, spread: 0.0, jitter: 0.02, pierceBonus: 0, knockback: 14,
       boomRadius: 90,   // 爆炸范围（像素）
       boomDur: 0.6,     // 爆炸特效时长
     },
     orange: {
       name: '橙子连射', icon: '🍊', kind: 'bullet',
       fireRate: 2.5, speed: 1.1, r: 0.8, damage: 0.4, spread: 0.16, jitter: 0.08, pierceBonus: 0,
+      knockback: 0.8,   // 击退力 ≈ 原来的 1/4（高射速下不把敌人推飞）
+    },
+    laser: {
+      name: '激光炮', icon: '🔦', kind: 'laser',
+      fireRate: 1.4, speed: 1.6, r: 0.7, damage: 0.5, spread: 0.0, jitter: 0.01, pierceBonus: 5, knockback: 1,
+      decay: 0.8,       // 穿透伤害递减系数（每次命中 ×0.8）
+      life: 2.0,        // 光束飞行时长（秒）
     },
   };
 
@@ -352,6 +378,10 @@
       hitCd: 0,                  // 对玩家的碰撞伤害冷却
       fireCd: rand(1.0, 2.2),    // spitter 下次开火倒计时（秒）
       fireInterval: rand(2.0, 2.6), // spitter 开火间隔（秒）
+      skillCd: rand(BOSS_SKILL_MIN, BOSS_SKILL_MAX),  // boss 技能冷却（秒）
+      chargeT: 0,                // boss 冲锋剩余时长（秒）
+      pauseT: 0,                 // boss 冲锋后停顿剩余时长（秒）
+      chargeSp: 0,               // boss 冲锋速度
       flashUntil: 0,             // 受击闪白
       wobble: rand(0, TAU),      // 正弦摆动的相位
     });
@@ -383,8 +413,8 @@
   }
 
   // 能量弹（blaster / orange 共用直线弹逻辑）；vis 为视觉 kind（'blaster'|'orange'）
-  // 发射点从枪口（玩家边缘）出发，angle 记录飞行朝向（绘制/拖尾用）
-  function spawnBullet(angle, damage, pierce, crit, size, radiusMult, speedMult, vis) {
+  // 发射点从枪口（玩家边缘）出发，angle 记录飞行朝向（绘制/拖尾用）；kb 为命中击退力
+  function spawnBullet(angle, damage, pierce, crit, size, radiusMult, speedMult, vis, kb) {
     const rad = BULLET_R * (size > 0 ? size : 1) * radiusMult;   // 半径 = 基础 × bulletSize × 武器倍率
     pushProjectile({
       kind: 'bullet',
@@ -398,8 +428,32 @@
       damage: damage,
       crit: crit,
       pierce: pierce,   // 剩余穿透次数
+      knockback: kb || 3,   // 命中击退力（orange 特调减小）
       t: 0,
       life: BULLET_LIFE,
+    });
+  }
+
+  // 激光光束（t17）：高速直线、穿透强化、伤害递减（kind='laser'）
+  function spawnLaser(angle, damage, pierce, crit, size, weapon) {
+    const rad = BULLET_R * (size > 0 ? size : 1) * weapon.r;
+    pushProjectile({
+      kind: 'laser',
+      vis: 'laser',          // 绘制 kind（光束视觉）
+      angle: angle,          // 光束朝向
+      x: player.x + Math.cos(angle) * player.r,   // 枪口发射
+      y: player.y + Math.sin(angle) * player.r,
+      vx: Math.cos(angle) * BULLET_SPEED * weapon.speed,
+      vy: Math.sin(angle) * BULLET_SPEED * weapon.speed,
+      r: rad,
+      damage: damage,        // stats.damage × 0.5
+      crit: crit,
+      pierce: pierce,        // stats.pierce + 5（穿透强化）
+      knockback: weapon.knockback || 1,
+      decay: weapon.decay || 0.8,   // 每次命中伤害递减系数
+      hitIds: new Set(),    // 已命中的敌人 id（光束细长，防同一敌人多帧重复命中）
+      t: 0,
+      life: weapon.life || 2.0,
     });
   }
 
@@ -479,8 +533,9 @@
     }
   }
 
-  function addEffect(type, x, y, dur) {
-    effects.push({ type: type, x: x, y: y, age: 0, dur: dur });
+  // 特效：type/x/y/age/dur；r 为可选范围字段（冲击波等按范围扩散的视觉用，art 读取 fx.r）
+  function addEffect(type, x, y, dur, r) {
+    effects.push({ type: type, x: x, y: y, age: 0, dur: dur, r: r || 0 });
   }
 
   /* ==================== 波次 / 难度 ==================== */
@@ -606,15 +661,18 @@
         spawnBoomerang(angle, damage, pierce, crit, size, weapon);
       } else if (weapon.kind === 'grenade') {
         spawnGrenade(angle, damage, crit, size, weapon);
+      } else if (weapon.kind === 'laser') {
+        spawnLaser(angle, damage, pierce, crit, size, weapon);
       } else {
-        spawnBullet(angle, damage, pierce, crit, size, weapon.r, weapon.speed, curWeapon);
+        spawnBullet(angle, damage, pierce, crit, size, weapon.r, weapon.speed, curWeapon, weapon.knockback);
       }
     }
   }
 
   /* ==================== 敌人更新 ==================== */
-  // 各类敌人移动策略：普通系追踪；swarm 快而乱；tank 慢速逼近；spitter 保持距离并远程射击
-  function updateEnemies(dt) {
+  // 各类敌人移动策略：普通系追踪；swarm 快而乱；tank 慢速逼近；spitter 保持距离并远程射击；
+  // boss 额外拥有技能系统（冲击波/扇形弹幕/加速冲锋，3.5-5s 周期，半血后略增频）
+  function updateEnemies(dt, stats) {
     for (let i = 0; i < enemies.length; i++) {
       const e = enemies[i];
       if (e.hitCd > 0) e.hitCd -= dt;
@@ -638,6 +696,30 @@
         // 远程怪不近身碰撞（伤害来自弹丸）
         continue;
       }
+      if (e.type === 'boss') {
+        // ── BOSS 技能系统（t17） ──
+        e.skillCd -= dt;
+        if (e.skillCd <= 0) {
+          e.skillCd = bossSkillInterval(e);
+          bossCastSkill(e, stats);
+          e.flashUntil = now() + 0.3;   // 前摇提示：闪白/变亮
+        }
+        // 冲锋状态：向玩家加速冲撞（限速 ≤ boss 速度×2.2 且 < 玩家速度×1.2/玩家速度）
+        if (e.chargeT > 0) {
+          e.chargeT -= dt;
+          const cs = e.chargeSp || Math.min(e.speed * 2.2, stats.speed * 1.1, stats.speed);
+          e.x += (dx / d) * cs * dt;
+          e.y += (dy / d) * cs * dt;
+          e.x = clamp(e.x, e.r, WORLD_SIZE - e.r);
+          e.y = clamp(e.y, e.r, WORLD_SIZE - e.r);
+          if (d < player.r + e.r) {
+            if (e.hitCd <= 0) { damagePlayer(e.damage, e.x, e.y); e.hitCd = CONTACT_CD; }
+          }
+          if (e.chargeT <= 0) e.pauseT = BOSS_PAUSE_TIME;   // 冲锋结束短暂停顿
+          continue;
+        }
+        if (e.pauseT > 0) { e.pauseT -= dt; continue; }     // 停顿不动
+      }
       // 追踪玩家（swarm 更快更乱、tank 更慢但更硬）
       e.x += (dx / d) * e.speed * dt;
       e.y += (dy / d) * e.speed * dt;
@@ -645,6 +727,9 @@
       const sway = e.type === 'swarm' ? 34 : 14;
       e.x += Math.cos(run.time * (e.type === 'swarm' ? 7 : 3) + e.wobble) * sway * dt;
       e.y += Math.sin(run.time * (e.type === 'swarm' ? 7 : 3) + e.wobble) * sway * dt;
+      // 位移 clamp 世界边界（需求 3：任何敌人永不出界）
+      e.x = clamp(e.x, e.r, WORLD_SIZE - e.r);
+      e.y = clamp(e.y, e.r, WORLD_SIZE - e.r);
       // 与玩家碰撞：按敌人伤害扣血（有冷却 + 玩家无敌帧）
       if (d < player.r + e.r) {
         if (e.hitCd <= 0) { damagePlayer(e.damage, e.x, e.y); e.hitCd = CONTACT_CD; }
@@ -669,13 +754,74 @@
     }
   }
 
-  /* ==================== 敌方弹丸（spitter 远程攻击） ==================== */
+  /* ==================== BOSS 技能（t17） ==================== */
+  // 技能间隔：基础 3.5-5s；半血后 ×0.75，下限 2.5s
+  function bossSkillInterval(e) {
+    let iv = rand(BOSS_SKILL_MIN, BOSS_SKILL_MAX);
+    if (e.hp < e.maxHp * 0.5) iv = Math.max(BOSS_SKILL_FLOOR, iv * BOSS_SKILL_FAST);
+    return iv;
+  }
+
+  // 随机释放一个技能：40% 冲击波 / 35% 扇形弹幕 / 25% 加速冲锋
+  function bossCastSkill(e, stats) {
+    const roll = Math.random();
+    if (roll < 0.4) bossShockwave(e);
+    else if (roll < 0.75) bossShots(e);
+    else bossCharge(e, stats);
+  }
+
+  // 技能 1：冲击波——扩散环形冲击波（drawEffect('shockwave')），范围内玩家受伤+击退。
+  // 范围 = max(280, boss.r×6)（boss.r=46 → 280 ≈ 直径 3 倍）；范围存入 fx.r 供 art 扩散视觉
+  function bossShockwave(e) {
+    const range = Math.max(BOSS_SHOCK_RANGE, e.r * 6);
+    addEffect('shockwave', e.x, e.y, 0.9, range);
+    const d = dist(e.x, e.y, player.x, player.y);
+    if (d < range + player.r) {
+      damagePlayer(e.damage * 1.2, e.x, e.y);
+      const dd = d || 1;
+      player.x = clamp(player.x + ((player.x - e.x) / dd) * 60, player.r, WORLD_SIZE - player.r);
+      player.y = clamp(player.y + ((player.y - e.y) / dd) * 60, player.r, WORLD_SIZE - player.r);
+    }
+  }
+
+  // 技能 2：扇形弹幕——向玩家方向发射 3-5 发弹丸（enemyShots，kind='bossShot'）
+  function bossShots(e) {
+    const n = 3 + Math.floor(Math.random() * 3);   // 3-5 发
+    const base = Math.atan2(player.y - e.y, player.x - e.x);
+    const spread = 0.28;                            // 扇形半角间隔（弧度）
+    for (let i = 0; i < n; i++) {
+      const a = base + (i - (n - 1) / 2) * spread;
+      const sp = 210;
+      if (enemyShots.length >= MAX_SHOTS) enemyShots.shift();
+      enemyShots.push({
+        kind: 'bossShot',
+        angle: a,
+        x: e.x + Math.cos(a) * (e.r + 10),
+        y: e.y + Math.sin(a) * (e.r + 10),
+        vx: Math.cos(a) * sp,
+        vy: Math.sin(a) * sp,
+        r: 7,
+        damage: e.damage * 0.8,
+        t: 0,
+        life: 3.0,
+      });
+    }
+  }
+
+  // 技能 3：加速冲锋——短时提速冲向玩家（限速 ≤ boss 速度×2.2 且 < 玩家速度×1.2/玩家速度）
+  function bossCharge(e, stats) {
+    e.chargeT = rand(BOSS_CHARGE_TIME[0], BOSS_CHARGE_TIME[1]);
+    e.chargeSp = Math.min(e.speed * 2.2, stats.speed * 1.1, stats.speed);
+  }
+
+  /* ==================== 敌方弹丸（spitter / boss 远程攻击） ==================== */
   // 生成一发敌方弹丸：瞄准玩家当前位置，慢速飞行，撞到玩家造成伤害后消失
   function spawnSpitterShot(e) {
     if (enemyShots.length >= MAX_SHOTS) enemyShots.shift();
     const a = Math.atan2(player.y - e.y, player.x - e.x);
     const sp = 180;   // 弹丸速度（像素/秒）
     enemyShots.push({
+      kind: 'spitterShot',  // 弹丸视觉 kind
       angle: a,       // 飞行朝向
       x: e.x + Math.cos(a) * (e.r + 8),
       y: e.y + Math.sin(a) * (e.r + 8),
@@ -764,17 +910,24 @@
         }
         if (hit) { explodeGrenade(b, stats); bullets.splice(i, 1); continue; }
       } else {
-        // 能量弹 / 回旋镖：穿透计数命中
+        // 能量弹 / 回旋镖 / 激光：穿透计数命中
         for (let j = enemies.length - 1; j >= 0; j--) {
           const e = enemies[j];
           if (dist(b.x, b.y, e.x, e.y) <= b.r + e.r) {
+            // 激光：每个敌人只命中一次（光束细长，防止穿过时多帧重复命中）
+            if (b.kind === 'laser') {
+              if (b.hitIds && b.hitIds.has(e.id)) continue;
+              if (b.hitIds) b.hitIds.add(e.id);
+            }
             // 命中：按实际扣血量计算生命偷取，再扣血 / 闪白 / 击退 / 命中粒子
             const dealt = Math.min(b.damage, e.hp);
             e.hp -= b.damage;
             e.flashUntil = now() + HIT_FLASH;
             const d = dist(b.x, b.y, e.x, e.y) || 1;
-            e.x += ((e.x - b.x) / d) * 3;
-            e.y += ((e.y - b.y) / d) * 3;
+            // 击退力按武器配置（orange 特调 1/4；激光 1；其余 3）——并 clamp 世界边界
+            const kb = b.knockback != null ? b.knockback : 3;
+            e.x = clamp(e.x + ((e.x - b.x) / d) * kb, e.r, WORLD_SIZE - e.r);
+            e.y = clamp(e.y + ((e.y - b.y) / d) * kb, e.r, WORLD_SIZE - e.r);
             burst(b.x, b.y, 3, b.crit ? '#ffddaa' : '#aaddff');
             // 分裂弹（rogue 质变强化 stats.split>0）：直线能量弹命中时散射 2 发 50% 伤害小弹
             if (b.kind === 'bullet' && !b.splitDisabled && stats && stats.split > 0) {
@@ -784,6 +937,8 @@
             if (stats && stats.lifesteal > 0) {
               run.hp = Math.min(player.maxHp, run.hp + dealt * stats.lifesteal);
             }
+            // 激光：穿透伤害递减（每次命中 ×0.8）
+            if (b.kind === 'laser') b.damage *= (b.decay || 0.8);
             // 穿透语义：pierce = 可额外命中的敌人数（0 表示命中第一个敌人即消失）
             b.pierce -= 1;
             if (e.hp <= 0) killEnemy(e, j);
@@ -831,10 +986,10 @@
         const dealt = Math.min(g.damage, e.hp);
         e.hp -= g.damage;
         e.flashUntil = now() + HIT_FLASH;
-        // 从爆炸中心向外击退
+        // 从爆炸中心向外击退（clamp 世界边界）
         const dd = d || 1;
-        e.x += ((e.x - g.x) / dd) * 14;
-        e.y += ((e.y - g.y) / dd) * 14;
+        e.x = clamp(e.x + ((e.x - g.x) / dd) * 14, e.r, WORLD_SIZE - e.r);
+        e.y = clamp(e.y + ((e.y - g.y) / dd) * 14, e.r, WORLD_SIZE - e.r);
         totalDealt += dealt;
         if (e.hp <= 0) killEnemy(e, j);
       }
@@ -1060,8 +1215,8 @@
       return;
     }
     bar.style.display = 'flex';
-    setFill('boss-fill', boss.maxHp ? clamp((boss.hp / boss.maxHp) * 100, 0, 100) : 0);
-    setText('boss-name', 'BOSS');
+    setFill('boss-fill', boss.maxHp ? Math.round(clamp((boss.hp / boss.maxHp) * 100, 0, 100)) : 0);
+    setText('boss-name', 'BOSS ' + Math.round(boss.hp) + '/' + Math.round(boss.maxHp));
   }
 
   function updateHud(stats) {
@@ -1160,7 +1315,7 @@
     updateWave(dt);
     updatePlayer(dt, stats);
     tryFire(dt, stats);
-    updateEnemies(dt);
+    updateEnemies(dt, stats);
     updateEnemyShots(dt);
     updateBossOrbs(dt);
     updateProjectiles(dt, stats);
@@ -1215,10 +1370,10 @@
         else opts.angle = b.angle || 0;                       // 飞行朝向角（blaster/orange/split）
         v.drawBullet(_ctx, b.x, b.y, b.r, opts);
       }
-      // 敌方弹丸（spitter 远程攻击）
+      // 敌方弹丸（spitter / boss 远程攻击）
       for (let i = 0; i < enemyShots.length; i++) {
         const s = enemyShots[i];
-        v.drawBullet(_ctx, s.x, s.y, s.r, { kind: 'spitterShot', angle: s.angle || 0 });
+        v.drawBullet(_ctx, s.x, s.y, s.r, { kind: s.kind || 'spitterShot', angle: s.angle || 0 });
       }
     }
     // boss 大光球（需求 5）：drawBossOrb 缺失时用 drawGem 兜底
@@ -1338,8 +1493,8 @@
     if (e.key.indexOf('Arrow') === 0 || e.key === ' ') e.preventDefault();   // 防页面滚动
     if (state === 'idle' && (e.key === 'Enter' || e.key === ' ')) start();
     if (state === 'gameover' && (e.key === 'Enter' || e.key === 'r' || e.key === 'R')) start();
-    // 数字键 1-4 切换武器（仅在游玩中）
-    if (state === 'playing' && !paused && e.key >= '1' && e.key <= '4') {
+    // 数字键 1-5 切换武器（仅在游玩中）
+    if (state === 'playing' && !paused && e.key >= '1' && e.key <= '5') {
       switchWeapon(Number(e.key) - 1);
     }
   }
@@ -1416,7 +1571,7 @@
 
   /* ==================== 导出 ==================== */
   NS.Core = {
-    version: '1.3.0',      // v1.3.0：波次系统+子弹朝向枪口+boss血量大增+boss血条+大光球（t13）
+    version: '1.4.0',      // v1.4.0：橙子击退减弱+激光武器+敌人击退边界+BOSS技能系统（t17）
     init: init,            // init(canvas, run?)
     start: start,          // start(run?) —— 开始新一局（供按钮/外部接管）
     destroy: destroy,      // 停止并清理

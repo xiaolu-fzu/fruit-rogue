@@ -146,20 +146,26 @@ for (var eti = 0; eti < eTypes.length; eti++) {
   ex += 90;
 }
 // 全部子弹 kind（含角度）
-var kinds = ['blaster', 'boomerang', 'pineapple', 'orange', 'split', 'spitterShot', 'enemy', 'grenade', 'bullet'];
-var kx = 100;
+var kinds = ['blaster', 'boomerang', 'pineapple', 'orange', 'split', 'spitterShot', 'enemy', 'grenade', 'bullet', 'laser', 'bossShot'];
+var kx = 85;
 for (var ki = 0; ki < kinds.length; ki++) {
   V.drawBullet(ctx2, kx, 420, 6, { kind: kinds[ki], angle: 0.5 });
-  kx += 80;
+  kx += 70;
 }
-V.drawBullet(ctx2, 800, 420, 6);                                       // 无 opts → 默认 blaster
+V.drawBullet(ctx2, 880, 420, 6);                                       // 无 opts → 默认 blaster
 V.drawGem(ctx2, 500, 400, 8, t);
 V.drawGem(ctx2, 550, 400, 10, t);
 V.drawParticle(ctx2, 100, 100, 3, '#aaddff');
 V.drawEffect(ctx2, 'explosion', 300, 300, 0.25);
 V.drawEffect(ctx2, 'levelup', 300, 300, 0.6);
 V.drawEffect(ctx2, 'hit', 300, 300, 0.15);
-check('7 个绘制函数（新旧签名/7 敌人/7 弹种）调用不抛异常', true);
+V.drawEffect(ctx2, 'shockwave', 300, 300, 0.3);
+V.drawEffect(ctx2, 'shockwave', 700, 300, 0.1);
+V.drawEffect(ctx2, 'shockwave', 700, 160, 0.5, 280);                    // t20：带扩散半径
+V.drawEffect(ctx2, 'shockwave', 900, 300, 0.3, 100);
+V.addEffect(500, 160, 'shockwave', { r: 280 });                        // 内部池带半径
+V.addEffect(600, 160, 'shockwave', {});                                // 内部池默认 280
+check('7 个绘制函数（新旧签名/7 敌人/11 弹种含 bossShot/5 特效含 shockwave+r）调用不抛异常', true);
 
 console.log('== 模拟 Enter 开局 + 泵帧跑主循环 ==');
 press('Enter');                       // idle → start()

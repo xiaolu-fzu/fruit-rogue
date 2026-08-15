@@ -15,10 +15,13 @@
  *   drawGem(ctx, x, y, r, t)
  *   drawBullet(ctx, x, y, r, opts)          opts:{kind, angle(弧度)}
  *     kind: 'blaster'蓝紫能量弹 | 'boomerang'西瓜旋转刀片 | 'pineapple'菠萝榴弹(尾焰) |
- *           'orange'橙子弹丸曳光 | 'split'分裂碎片 | 'spitterShot'酸液球 | 'enemy'敌弹
+ *           'orange'橙子弹丸曳光 | 'split'分裂碎片 | 'spitterShot'酸液球 |
+ *           'laser'激光光束(细长亮线+发光核心+尾部渐隐) | 'bossShot'BOSS扇形弹幕(暗紫尖刺弹) |
+ *           'enemy'敌弹
  *   drawParticle(ctx, x, y, r, color)       core 自行控制透明度
  *   drawBossOrb(ctx, x, y, r, t)            boss 死亡掉落的大光球（金色旋转能量球）
- *   drawEffect(ctx, type, x, y, age)        type:'explosion'|'levelup'|'hit'，age 秒
+ *   drawEffect(ctx, type, x, y, age[, r])   type:'explosion'|'levelup'|'hit'|'shockwave'，age 秒；
+ *                                           shockwave 的 r=扩散半径（core 传 fx.r，未传默认 280）
  *
  * ─── 二、扩展接口（可选，供 core / 整合脚本 / 演示使用）────────
  *   init(canvas) / getSize() / resize()     画布初始化与逻辑尺寸
@@ -1107,6 +1110,72 @@
       }
       ctx.globalAlpha = 1;
       ctx.restore();
+    } else if (kind === 'bossShot') {
+      // BOSS 扇形弹幕（t20 缺陷修复）：暗紫尖刺弹——6 根旋转尖刺 + 暗紫核心 + 血红光晕，
+      // 明显区别于玩家 blaster（蓝紫拉长弹体）与小敌弹 enemy（4 短刺浅紫）
+      ctx.save();
+      ctx.rotate((b.phase || 0) + t * 2.2 + ang * 0.15);
+      // 暗红光晕
+      glow(0, 0, r * 2.6, '#ff3b6e', 0.4 + 0.12 * Math.sin(t * 7));
+      // 6 根尖刺（长、暗紫、带红尖）
+      ctx.lineWidth = 2;
+      for (var bi = 0; bi < 6; bi++) {
+        var ba = (bi / 6) * TAU;
+        ctx.save();
+        ctx.rotate(ba);
+        ctx.fillStyle = '#5e2f9e';
+        ctx.strokeStyle = '#1a0f3a';
+        ctx.beginPath();
+        ctx.moveTo(-r * 0.32, -r * 0.55);
+        ctx.lineTo(0, -r * 1.9);
+        ctx.lineTo(r * 0.32, -r * 0.55);
+        ctx.closePath(); ctx.fill(); ctx.stroke();
+        // 红尖
+        ctx.fillStyle = '#ff5c7a';
+        ctx.beginPath();
+        ctx.moveTo(-r * 0.1, -r * 1.25);
+        ctx.lineTo(0, -r * 1.9);
+        ctx.lineTo(r * 0.1, -r * 1.25);
+        ctx.closePath(); ctx.fill();
+        ctx.restore();
+      }
+      // 暗紫核心
+      ctx.fillStyle = radial(0, 0, 0, r, '#b28bf5', '#3a1a5e');
+      ctx.beginPath(); ctx.arc(0, 0, r * 0.95, 0, TAU); ctx.fill();
+      ctx.lineWidth = 2.5; ctx.strokeStyle = '#1a0f3a'; ctx.stroke();
+      // 核心红眼亮点
+      ctx.fillStyle = '#ff5c7a';
+      ctx.beginPath(); ctx.arc(0, 0, r * 0.3, 0, TAU); ctx.fill();
+      ctx.restore();
+    } else if (kind === 'laser') {
+      // 激光光束（t16）：沿飞行角的细长亮线光束——多层光晕 + 白亮核心 + 尾部渐隐，区别于 blaster
+      var L = r * 9;                       // 光束长度（细长）
+      ctx.save();
+      ctx.rotate(ang);
+      ctx.lineCap = 'round';
+      // 外层柔光（宽、淡）
+      ctx.strokeStyle = 'rgba(120,220,255,0.22)';
+      ctx.lineWidth = r * 2.6;
+      ctx.beginPath(); ctx.moveTo(-L * 0.5, 0); ctx.lineTo(L, 0); ctx.stroke();
+      // 中层光晕（青蓝）
+      ctx.strokeStyle = 'rgba(140,200,255,0.55)';
+      ctx.lineWidth = r * 1.3;
+      ctx.beginPath(); ctx.moveTo(-L * 0.4, 0); ctx.lineTo(L, 0); ctx.stroke();
+      // 尾部渐隐拖尾（从尾到头的渐变线）
+      var lgs = ctx.createLinearGradient(-L * 0.9, 0, 0, 0);
+      lgs.addColorStop(0, 'rgba(60,140,255,0)');
+      lgs.addColorStop(1, 'rgba(160,220,255,0.9)');
+      ctx.strokeStyle = lgs;
+      ctx.lineWidth = r * 0.9;
+      ctx.beginPath(); ctx.moveTo(-L * 0.9, 0); ctx.lineTo(0, 0); ctx.stroke();
+      // 白亮核心（细线 + 头部亮点）
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = r * 0.38;
+      ctx.beginPath(); ctx.moveTo(-L * 0.7, 0); ctx.lineTo(L * 0.95, 0); ctx.stroke();
+      ctx.fillStyle = '#ffffff';
+      glow(L * 0.95, 0, r * 0.9, '#9fd8ff', 0.7);
+      ctx.beginPath(); ctx.arc(L * 0.95, 0, r * 0.42, 0, TAU); ctx.fill();
+      ctx.restore();
     } else {
       // blaster 蓝紫能量弹（用户要求：别全是蓝光点 → 拉长弹体 + 紫蓝渐变）
       ctx.save();
@@ -1345,6 +1414,20 @@
         ctx.beginPath(); ctx.arc(px, py, p.size * 0.7, 0, TAU); ctx.fill();
       }
       ctx.globalAlpha = 1;
+    } else if (fx.type === 'shockwave') {
+      // 内部池冲击波：扩散半径取 fx.r（addEffect 传入），未传默认 280
+      var swEase = 1 - Math.pow(1 - age, 3);
+      var swMax = (fx.r && fx.r > 0) ? fx.r : 280;
+      var swR = 8 + swEase * (swMax - 8);
+      ctx.strokeStyle = '#7fd4ff';
+      ctx.globalAlpha = a * 0.85;
+      ctx.lineWidth = 1.5 + a * 2.5;
+      ctx.beginPath(); ctx.arc(fx.x, fx.y, swR, 0, TAU); ctx.stroke();
+      ctx.strokeStyle = '#ffffff';
+      ctx.globalAlpha = a * 0.65;
+      ctx.lineWidth = 3 + a * 3;
+      ctx.beginPath(); ctx.arc(fx.x, fx.y, swR * 0.78, 0, TAU); ctx.stroke();
+      ctx.globalAlpha = 1;
     } else {
       // 默认：膨胀消散圆
       ctx.globalAlpha = a * 0.6;
@@ -1362,9 +1445,10 @@
     }
     _effects = keep;
   }
-  // core 契约 drawEffect(ctx, type, x, y, age)：按类型 + 已存在秒数绘制
-  function paintContractFx(type, x, y, age) {
-    var dur = type === 'explosion' ? 0.5 : type === 'levelup' ? 1.0 : 0.3;
+  // core 契约 drawEffect(ctx, type, x, y, age[, r])：按类型 + 已存在秒数绘制；
+  // r 为冲击波扩散半径（t19 core 传 fx.r），未传默认 280
+  function paintContractFx(type, x, y, age, r) {
+    var dur = type === 'explosion' ? 0.5 : type === 'levelup' ? 1.0 : type === 'shockwave' ? 0.6 : 0.3;
     var p = clamp(age / dur, 0, 1);
     var a = 1 - p;
     var i, ra;
@@ -1405,6 +1489,44 @@
         ctx.stroke();
       }
       ctx.restore();
+      ctx.globalAlpha = 1;
+    } else if (type === 'shockwave') {
+      // 冲击波（t16/t20）：圆环外扩 + 渐隐（先快后慢的缓出），双环 + 辐射线；
+      // 扩散半径 = core 传入的 fx.r（t19：BOSS 冲击波 ≈ boss r×6），未传默认 280
+      var ease = 1 - Math.pow(1 - p, 3);          // easeOutCubic：先快后慢
+      var rMax = (r && r > 0) ? r : 280;
+      var rw = 8 + ease * (rMax - 8);
+      // 外环（青蓝，细）
+      ctx.strokeStyle = '#7fd4ff';
+      ctx.globalAlpha = a * 0.85;
+      ctx.lineWidth = 1.5 + a * 2.5;
+      ctx.beginPath(); ctx.arc(x, y, rw, 0, TAU); ctx.stroke();
+      // 内环（白亮，宽）
+      ctx.strokeStyle = '#ffffff';
+      ctx.globalAlpha = a * 0.65;
+      ctx.lineWidth = 3 + a * 3;
+      ctx.beginPath(); ctx.arc(x, y, rw * 0.78, 0, TAU); ctx.stroke();
+      // 辐射线（8 道，随环扩散）
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(age * 2);
+      ctx.strokeStyle = 'rgba(180,230,255,0.5)';
+      ctx.lineWidth = 2;
+      ctx.globalAlpha = a * 0.7;
+      for (i = 0; i < 8; i++) {
+        ra = (i / 8) * TAU;
+        ctx.beginPath();
+        ctx.moveTo(Math.cos(ra) * rw * 0.85, Math.sin(ra) * rw * 0.85);
+        ctx.lineTo(Math.cos(ra) * rw * 1.08, Math.sin(ra) * rw * 1.08);
+        ctx.stroke();
+      }
+      ctx.restore();
+      // 起始闪光
+      if (p < 0.15) {
+        ctx.globalAlpha = (1 - p / 0.15) * 0.7;
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath(); ctx.arc(x, y, 20 * (1 - p * 0.6), 0, TAU); ctx.fill();
+      }
       ctx.globalAlpha = 1;
     } else {
       // hit：受击红闪 + 白环
@@ -1955,8 +2077,8 @@
     drawBossOrb: function (c, x, y, r, t) {
       withCtx(c, function () { paintBossOrb(x, y, r, t); });
     },
-    drawEffect: function (c, type, x, y, age) {
-      withCtx(c, function () { paintContractFx(type, x, y, age); });
+    drawEffect: function (c, type, x, y, age, r) {
+      withCtx(c, function () { paintContractFx(type, x, y, age, r); });
     },
     // ===== 生命周期 =====
     init: init,

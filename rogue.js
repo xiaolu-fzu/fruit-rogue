@@ -40,8 +40,9 @@
  *   level/xp/xpNeeded  等级、当前经验、升级所需经验
  *   upgrades           已选强化 id 数组
  *   weapons            已解锁武器 id 数组（初始 ['blaster']；强化可解锁
- *                      'boomerang'西瓜回旋镖 / 'pineapple'菠萝榴弹 / 'orange'橙子连射，
- *                      武器弹道逻辑归 core.js，数字键 1-4 切换）
+ *                      'boomerang'西瓜回旋镖 / 'pineapple'菠萝榴弹 / 'orange'橙子连射 /
+ *                      'laser'激光炮，
+ *                      武器弹道逻辑归 core.js，数字键 1-5 切换）
  *   stats              当前全部属性（getStats 返回其副本）
  *   hp                 玩家实时生命（core.js 读写：受击扣血、regen 回血，
  *                      并 clamp 到 getStats(run).maxHp，<=0 判负）
@@ -109,7 +110,7 @@
   }
 
   /* ==========================================================================
-   * 四、强化池（21 种 ≥ 12 种要求；数值型大幅加强至 +25~40% 量级）
+   * 四、强化池（22 种 ≥ 12 种要求；数值型大幅加强至 +25~40% 量级）
    *   每个强化：id 唯一 / name 名称 / desc 效果描述 / icon 图标(emoji)
    *             effect(run) 真实修改 run.stats（或 run.hp / run.weapons）
    *             capField+cap 可选：软上限，满后不再出现在升级选项里
@@ -266,7 +267,7 @@
       effect: function (run) { run.stats.killHeal += 1; }
       // 已在本模块 onEnemyKilled 内实现回血，core 无需任何改动
     },
-    /* ---------- 武器解锁强化（3 种，水果风味） ---------- */
+    /* ---------- 武器解锁强化（4 种，水果风味） ---------- */
     {
       id: 'weapon_boomerang',
       name: '西瓜回旋镖',
@@ -287,6 +288,13 @@
       desc: '解锁武器：橙子连射手枪（高射速低伤害的机关枪风）',
       icon: '🍊',
       weapon: 'orange'
+    },
+    {
+      id: 'weapon_laser',
+      name: '激光炮',
+      desc: '解锁武器：激光炮（穿透敌人的光束，伤害较低但连穿多个）',
+      icon: '🔫',
+      weapon: 'laser'
     }
   ];
 

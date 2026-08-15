@@ -104,13 +104,15 @@ if (FG.Rogue) {
       R.applyUpgrade(r2, dmgOpt.id)
       check('C5 强化生效', R.getStats(r2).damage > before, `${dmgOpt.name}: ${before}→${R.getStats(r2).damage}`)
     } else {
-      // 兜底：验证应用任一强化后 getStats 至少有一个字段变化
-      const b = R.getStats(r2)
+      // 兜底：验证应用任一强化后 getStats 或 run.weapons 变化（武器解锁类强化改 weapons）
+      const bStats = JSON.stringify(R.getStats(r2))
+      const bWeapons = JSON.stringify(r2.weapons || [])
       const opt = R.onLevelUp(r2)[0]
       R.applyUpgrade(r2, opt.id)
-      const a = R.getStats(r2)
-      const changed = Object.keys(b).some(k => b[k] !== a[k])
-      check('C5 强化生效', changed, `${opt.name}: ${JSON.stringify(b)} → ${JSON.stringify(a)}`)
+      const aStats = JSON.stringify(R.getStats(r2))
+      const aWeapons = JSON.stringify(r2.weapons || [])
+      const changed = bStats !== aStats || bWeapons !== aWeapons
+      check('C5 强化生效', changed, `${opt.name}: stats ${bStats !== aStats ? '变' : '不变'} / weapons ${bWeapons !== aWeapons ? '变' : '不变'}`)
     }
   } catch (e) { check('C5 强化生效', false, e.message) }
 }

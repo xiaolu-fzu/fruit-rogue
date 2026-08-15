@@ -52,7 +52,8 @@ R.applyUpgrade(run2, 'weapon_orange');
 check('三种武器全解锁', JSON.stringify(run2.weapons) === '["blaster","boomerang","pineapple","orange"]', JSON.stringify(run2.weapons));
 let offers = [];
 for (let i = 0; i < 30; i++) offers.push(...R.onLevelUp(run2).map(o => o.id));
-check('已解锁武器不再出现在选项', !offers.some(id => id.startsWith('weapon_')), offers.filter(id => id.startsWith('weapon_')).join(','));
+check('已解锁武器不再出现在选项', !offers.some(id => ['weapon_boomerang', 'weapon_pineapple', 'weapon_orange'].includes(id)),
+  offers.filter(id => id.startsWith('weapon_')).join(','));
 
 // 4. 击杀回血（onEnemyKilled 内实现，无需 core 改动）
 const run3 = R.makeRun(3);
@@ -73,10 +74,20 @@ R.applyUpgrade(run4, 'split');
 R.applyUpgrade(run4, 'split'); // 第 4 次应被上限 3 拒绝
 check('分裂弹上限 3 拒绝第 4 次', R.getStats(run4).split === 3, 'split=' + R.getStats(run4).split);
 
-// 6. 池大小 + 三选一互不重复
-check('强化池 21 种 (≥12)', R.UPGRADES.length === 21, 'size=' + R.UPGRADES.length);
+// 6. 池大小 + 三选一互不重复 + laser 武器解锁
+check('强化池 22 种 (≥12)', R.UPGRADES.length === 22, 'size=' + R.UPGRADES.length);
 const opts = R.onLevelUp(run);
 check('三选一 3 个且互不重复', opts.length === 3 && new Set(opts.map(o => o.id)).size === 3, opts.map(o => o.id).join(','));
+
+// 6b. laser 激光炮武器解锁（第 5 种武器）
+const runL = R.makeRun(21);
+check('laser 解锁前不在 weapons', runL.weapons.indexOf('laser') === -1, JSON.stringify(runL.weapons));
+check('applyUpgrade(weapon_laser) 成功', R.applyUpgrade(runL, 'weapon_laser') === true);
+check('laser 已 push 进 run.weapons', runL.weapons.indexOf('laser') !== -1, JSON.stringify(runL.weapons));
+check('重复解锁 laser 返回 false（去重）', R.applyUpgrade(runL, 'weapon_laser') === false);
+let offersL = [];
+for (let i = 0; i < 30; i++) offersL.push(...R.onLevelUp(runL).map(o => o.id));
+check('已解锁 laser 不再出现在选项', !offersL.includes('weapon_laser'));
 
 // 7. 契约回归：getStats 必含字段 + 副本安全 + 掉落逻辑不变
 const required = ['damage', 'fireRate', 'speed', 'multishot', 'pierce', 'critChance', 'critMult', 'magnet', 'maxHp', 'regen'];
